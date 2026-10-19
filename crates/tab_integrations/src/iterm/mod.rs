@@ -19,6 +19,8 @@ use tracing::{
 
 use crate::Result;
 
+pub mod prefs;
+
 /// `Title Components` bits, from iTerm's `iTermTitleComponents`.
 pub const SESSION_NAME: u64 = 1;
 pub const JOB: u64 = 2;
