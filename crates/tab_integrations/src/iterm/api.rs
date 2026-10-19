@@ -22,6 +22,7 @@ use crate::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const APP_NAME: &str = "Tab";
 const REQUEST_ID: i64 = 1;
 const STATUS_OK: i32 = 0;
@@ -69,7 +70,12 @@ pub struct SetProfilePropertyResponse {
 
 /// Sets `key` to `json_value` on the profile `guid` in the running iTerm.
 pub async fn set_profile_property(guid: &str, key: &str, json_value: &str) -> Result<()> {
-    tokio::time::timeout(TIMEOUT, send(request(REQUEST_ID, guid, key, json_value)))
+    // The first request can wait on the user answering macOS's and iTerm's prompts.
+    let (cookie, api_key) = tokio::time::timeout(PROMPT_TIMEOUT, cookie_and_key())
+        .await
+        .map_err(|_elapsed| custom("timed out waiting for iTerm's permission"))??;
+    let message = request(REQUEST_ID, guid, key, json_value);
+    tokio::time::timeout(TIMEOUT, send(&cookie, &api_key, message))
         .await
         .map_err(|_elapsed| custom("timed out talking to iTerm"))?
 }
@@ -102,8 +108,7 @@ fn check_response(id: i64, message: &ServerOriginatedMessage) -> Result<()> {
     }
 }
 
-async fn send(message: ClientOriginatedMessage) -> Result<()> {
-    let (cookie, key) = cookie_and_key().await?;
+async fn send(cookie: &str, key: &str, message: ClientOriginatedMessage) -> Result<()> {
     let socket = dirs::home_dir()
         .ok_or_else(|| custom("no home directory"))?
         .join("Library/Application Support/iTerm2/private/socket");
@@ -117,8 +122,8 @@ async fn send(message: ClientOriginatedMessage) -> Result<()> {
         ("x-iterm2-advisory-name", APP_NAME),
         ("x-iterm2-disable-auth-ui", "true"),
         ("x-iterm2-library-version", "tab 1"),
-        ("x-iterm2-cookie", &cookie),
-        ("x-iterm2-key", &key),
+        ("x-iterm2-cookie", cookie),
+        ("x-iterm2-key", key),
     ] {
         headers.insert(
             name,

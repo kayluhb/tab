@@ -17,7 +17,10 @@ use tracing::{
     warn,
 };
 
-use crate::Result;
+use crate::{
+    Error,
+    Result,
+};
 
 pub mod api;
 pub mod prefs;
@@ -63,6 +66,40 @@ pub enum UndoOutcome {
     Nothing,
     Done,
     RestartIterm,
+}
+
+/// The real iTerm on this Mac.
+pub struct SystemIterm;
+
+#[async_trait]
+impl ItermPort for SystemIterm {
+    fn is_running(&self) -> bool {
+        !macos_utils::applications::running_applications_matching(prefs::DOMAIN).is_empty()
+    }
+
+    fn read_prefs(&self) -> Result<Option<Prefs>> {
+        Ok(prefs::export()?.as_ref().and_then(prefs::parse_prefs))
+    }
+
+    fn read_title_components(&self, guid: &str) -> Result<Option<Option<u64>>> {
+        Ok(prefs::export()?.and_then(|root| prefs::title_components_for(&root, guid)))
+    }
+
+    async fn set_title_components_live(&self, guid: &str, value: u64) -> Result<()> {
+        api::set_profile_property(guid, "Title Components", &value.to_string()).await
+    }
+
+    fn write_title_components(&self, guid: &str, value: u64) -> Result<()> {
+        let mut root = prefs::export()?.ok_or(Error::Custom("iTerm has no preferences".into()))?;
+        if !prefs::set_title_components(&mut root, guid, value) {
+            return Err(Error::Custom("iTerm profile not found".into()));
+        }
+        prefs::import(&root)
+    }
+
+    fn write_api_server(&self, enabled: bool) -> Result<()> {
+        prefs::write_api_server(enabled)
+    }
 }
 
 /// Clears Job, falling back to Session Name rather than leaving the title empty.

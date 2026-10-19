@@ -353,6 +353,17 @@ def build_macos_desktop_app(
     # Specifies the app is an "agent app"
     run_cmd(["defaults", "write", info_plist_path, "LSUIElement", "-bool", "TRUE"])
 
+    # Lets macOS ask the user before Tab talks to iTerm (see crates/tab_integrations/src/iterm)
+    run_cmd(
+        [
+            "defaults",
+            "write",
+            info_plist_path,
+            "NSAppleEventsUsageDescription",
+            "Tab connects to iTerm to stop tab titles showing its terminal wrapper instead of the running command.",
+        ]
+    )
+
     # Add q:// association to bundle
     run_cmd(
         [

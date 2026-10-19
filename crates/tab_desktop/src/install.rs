@@ -78,6 +78,12 @@ pub async fn run_install(ctx: Arc<Context>) {
             error!(%err, "Failed updating ssh integration");
         }
     }
+
+    // turn off iTerm's Job title component, which only ever shows tabterm. In the background: the
+    // first time, it waits on the user answering macOS's and iTerm's permission prompts.
+    tokio::spawn(async {
+        tab_integrations::iterm::apply(&tab_settings::State::new(), &tab_integrations::iterm::SystemIterm).await;
+    });
 }
 
 /// Symlink, and overwrite if it already exists and is invalid or not a symlink

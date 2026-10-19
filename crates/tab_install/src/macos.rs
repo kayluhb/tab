@@ -1,7 +1,10 @@
 use std::ffi::CStr;
 use std::path::Path;
 
-use tab_integrations::vscode;
+use tab_integrations::{
+    iterm,
+    vscode,
+};
 use tab_util::consts::APP_BUNDLE_ID;
 use tab_util::directories;
 use tokio::fs;
@@ -92,6 +95,11 @@ pub async fn uninstall_terminal_integrations() {
                 .await
                 .map_err(|err| warn!("Could not remove iTerm integration {path}: {err}"))
                 .ok();
+        }
+
+        // Put back iTerm's Job title component, if Tab turned it off
+        if iterm::undo(&tab_settings::State::new(), &iterm::SystemIterm).await == iterm::UndoOutcome::RestartIterm {
+            eprintln!("Restart iTerm to bring back the job name in tab titles.");
         }
 
         // Delete VSCode integration
