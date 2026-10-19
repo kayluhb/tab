@@ -21,6 +21,16 @@ fi
 [ -d .venv ] || python3.11 -m venv .venv
 .venv/bin/pip install -q -r build-scripts/requirements.txt
 
+# Build only for this Mac's architecture, which halves the release build.
+# Set TAB_BUILD_TARGET_TRIPLE=universal-apple-darwin for a universal build.
+# Asks the hardware rather than rustc, which reports x86_64 when installed under Rosetta.
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+  native_triple=aarch64-apple-darwin
+else
+  native_triple=x86_64-apple-darwin
+fi
+export TAB_BUILD_TARGET_TRIPLE="${TAB_BUILD_TARGET_TRIPLE:-$native_triple}"
+
 .venv/bin/python build-scripts/main.py build "$@"
 
 app_name="$(cd build-scripts && ../.venv/bin/python -c 'import const; print(const.APP_NAME)')"

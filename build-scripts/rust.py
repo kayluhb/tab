@@ -76,6 +76,9 @@ def rust_targets() -> List[str]:
     """
     match platform.system():
         case "Darwin":
+            triple = get_target_triple()
+            if triple != "universal-apple-darwin":
+                return [triple]
             return ["x86_64-apple-darwin", "aarch64-apple-darwin"]
         case other:
             raise ValueError(f"Unsupported platform {other}, only macOS is supported")

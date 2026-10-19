@@ -203,9 +203,9 @@ def build_cargo_bin(
     else:
         target_subdir = "debug"
 
-    # create "universal" binary for macos
+    # create the macOS binary, universal when building for several targets
     if isDarwin():
-        out_path = BUILD_DIR / f"{output_name or package}-universal-apple-darwin"
+        out_path = BUILD_DIR / f"{output_name or package}-{get_target_triple()}"
         args = [
             "lipo",
             "-create",

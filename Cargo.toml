@@ -232,8 +232,12 @@ zero_sized_map_values = "warn"
 
 [profile.release]
 debug = 1
-incremental = true
+incremental = false
 lto = "off"
+
+# Debug info for dependencies costs gigabytes in target/ and is rarely stepped through
+[profile.dev.package."*"]
+debug = false
 
 [profile.dev.package.insta]
 opt-level = 3
