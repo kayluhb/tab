@@ -28,6 +28,8 @@ pub mod prefs;
 /// `Title Components` bits, from iTerm's `iTermTitleComponents`.
 pub const SESSION_NAME: u64 = 1;
 pub const JOB: u64 = 2;
+/// A custom title; iTerm treats it as exclusive of every other component.
+pub const CUSTOM: u64 = 16;
 
 pub const TITLE_RECORD_KEY: &str = "iterm.titleJob";
 pub const API_RECORD_KEY: &str = "iterm.enabledApiServer";
@@ -177,7 +179,8 @@ pub async fn undo(state: &State, port: &dyn ItermPort) -> UndoOutcome {
             if let Ok(Some(now)) = port.read_title_components(&record.guid) {
                 let now = now.unwrap_or(JOB);
                 let restore = if now == record.after { record.before } else { now | JOB };
-                if restore != now {
+                // A custom title excludes every other component, so Job can't be added back to it.
+                if now & CUSTOM == 0 && restore != now {
                     outcome = restore_title(port, &record.guid, restore).await;
                 }
             }
@@ -439,6 +442,15 @@ mod tests {
         let port = undo_port(true, 1 | 4);
         undo(&state, &port).await;
         assert_eq!(port.calls(), vec!["live:GUID=7"]);
+    }
+
+    #[tokio::test]
+    async fn undo_leaves_custom_title_alone() {
+        let state = state_with_record(&cleared(3, 1));
+        let port = undo_port(true, 16);
+        assert_eq!(undo(&state, &port).await, UndoOutcome::Nothing);
+        assert!(port.calls().is_empty());
+        assert_eq!(record(&state), None);
     }
 
     #[tokio::test]
