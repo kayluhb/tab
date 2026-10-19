@@ -2,6 +2,8 @@ pub mod backup;
 pub mod error;
 pub mod file;
 pub mod input_method;
+#[cfg(target_os = "macos")]
+pub mod iterm;
 pub mod shell;
 pub mod ssh;
 pub mod vscode;
