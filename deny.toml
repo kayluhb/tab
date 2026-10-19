@@ -21,6 +21,11 @@ ignore = [
   "RUSTSEC-2026-0173",
   # unsafe-libyaml, via serde_yaml
   "RUSTSEC-2024-0449",
+  # zvariant, zbus_names, zvariant_derive, merged into zbus 6, via rfd -> ashpd -> zbus 5
+  # (Linux only). Remove once ashpd moves to zbus 6.
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
 ]
 
 [licenses]
