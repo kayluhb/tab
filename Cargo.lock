@@ -6714,12 +6714,15 @@ dependencies = [
  "core-foundation 0.10.1",
  "dirs 5.0.1",
  "dispatch",
+ "futures",
+ "http",
  "indoc",
  "macos-utils",
  "nix 0.29.0",
  "objc",
  "owo-colors",
  "plist",
+ "prost",
  "regex",
  "serde",
  "serde_json",
@@ -6729,6 +6732,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 

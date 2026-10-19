@@ -19,6 +19,7 @@ use tracing::{
 
 use crate::Result;
 
+pub mod api;
 pub mod prefs;
 
 /// `Title Components` bits, from iTerm's `iTermTitleComponents`.
