@@ -26,8 +26,13 @@ pub enum ShellMessage {
     Prompt { exit_code: Option<i32>, cwd: String },
     /// A command is about to run
     PreExec { command: String },
-    /// The edit buffer changed
-    Buffer { cursor: usize, text: String },
+    /// The edit buffer changed; `seq` counts changes, so tabterm can tag its edits
+    /// with the buffer they were computed from
+    Buffer { seq: u64, cursor: usize, text: String },
+    /// The exported environment, as key/value pairs. Sent when it changes.
+    Env(Vec<(String, String)>),
+    /// The shell's aliases, in the format `alias` prints them. Sent when they change.
+    Alias(String),
     /// A bound key was pressed; tabterm answers with [`LinkMessage::Key`]
     Key { name: String },
     /// The terminal tab or window gained or lost focus, from focus reporting (`CSI ? 1004 h`)
@@ -37,12 +42,24 @@ pub enum ShellMessage {
 /// A message to the shell
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkMessage {
-    /// Answer to [`ShellMessage::Key`]: whether tabterm took the key, and whether a
-    /// buffer will follow on the push connection. zle can only run a line from inside
-    /// a widget, so the key widget waits for that buffer instead of the push handler.
+    /// Answer to [`ShellMessage::Key`]: whether tabterm took the key, and whether the
+    /// key widget should wait for the buffer that follows on the push connection. zle
+    /// can only run a line from inside a widget, so for actions that can run it the
+    /// widget reads that buffer instead of the push handler.
     Key { taken: bool, expect_buffer: bool },
-    /// Replace the edit buffer, and run it if `execute`
-    SetBuffer { cursor: usize, text: String, execute: bool },
+    /// Replace the edit buffer if it is still at `seq` (any buffer if `None`), and
+    /// run it if `execute`
+    SetBuffer {
+        seq: Option<u64>,
+        cursor: usize,
+        text: String,
+        execute: bool,
+    },
+    /// The popup's top suggestion: ghost text to show after `buffer`
+    Ghost { buffer: String, suffix: String },
+    /// The keys the popup may take, by name: the shell binds these and gives every
+    /// other key back its own widget
+    Bind { keys: Vec<String> },
     /// Answer to [`ShellMessage::Prompt`] when there is nothing to start the line with
     Nothing,
 }
@@ -104,9 +121,19 @@ impl ShellMessage {
                 command: unescape(next("command")?),
             },
             "buffer" => ShellMessage::Buffer {
+                seq: next("seq")?.parse()?,
                 cursor: next("cursor")?.parse()?,
                 text: unescape(next("text")?),
             },
+            "env" => {
+                let mut pairs = Vec::new();
+                while let Some(key) = fields.next() {
+                    let value = fields.next().ok_or_else(|| anyhow!("env: {key} has no value"))?;
+                    pairs.push((unescape(key), unescape(value)));
+                }
+                ShellMessage::Env(pairs)
+            },
+            "alias" => ShellMessage::Alias(unescape(next("text")?)),
             "key" => ShellMessage::Key {
                 name: next("name")?.to_owned(),
             },
@@ -130,8 +157,26 @@ impl LinkMessage {
                 format!("key\t{}\t{}\n", u8::from(*taken), u8::from(*expect_buffer))
             },
             LinkMessage::Nothing => "none\n".into(),
-            LinkMessage::SetBuffer { cursor, text, execute } => {
-                format!("set\t{cursor}\t{}\t{}\n", u8::from(*execute), escape(text))
+            LinkMessage::SetBuffer {
+                seq,
+                cursor,
+                text,
+                execute,
+            } => {
+                let seq = seq.map(|seq| seq.to_string()).unwrap_or_default();
+                format!("set\t{seq}\t{cursor}\t{}\t{}\n", u8::from(*execute), escape(text))
+            },
+            LinkMessage::Ghost { buffer, suffix } => {
+                format!("ghost\t{}\t{}\n", escape(buffer), escape(suffix))
+            },
+            LinkMessage::Bind { keys } => {
+                let mut line = String::from("bind");
+                for key in keys {
+                    line.push('\t');
+                    line.push_str(&escape(key));
+                }
+                line.push('\n');
+                line
             },
         }
     }
@@ -191,16 +236,31 @@ mod tests {
             }
         );
         assert_eq!(
-            ShellMessage::parse("buffer\t6\tgit ch").unwrap(),
+            ShellMessage::parse("buffer\t4\t6\tgit ch").unwrap(),
             ShellMessage::Buffer {
+                seq: 4,
                 cursor: 6,
                 text: "git ch".into(),
             }
         );
-        assert_eq!(ShellMessage::parse("buffer\t0\t").unwrap(), ShellMessage::Buffer {
+        assert_eq!(ShellMessage::parse("buffer\t0\t0\t").unwrap(), ShellMessage::Buffer {
+            seq: 0,
             cursor: 0,
             text: String::new(),
         });
+        assert_eq!(
+            ShellMessage::parse("env\tPATH\t/bin:/usr/bin\tMULTI\ta\\nb\tEMPTY\t").unwrap(),
+            ShellMessage::Env(vec![
+                ("PATH".into(), "/bin:/usr/bin".into()),
+                ("MULTI".into(), "a\nb".into()),
+                ("EMPTY".into(), String::new()),
+            ])
+        );
+        assert_eq!(ShellMessage::parse("env").unwrap(), ShellMessage::Env(vec![]));
+        assert_eq!(
+            ShellMessage::parse("alias\tg=git\\nll='ls -l'").unwrap(),
+            ShellMessage::Alias("g=git\nll='ls -l'".into())
+        );
         assert_eq!(ShellMessage::parse("key\tshift+tab").unwrap(), ShellMessage::Key {
             name: "shift+tab".into()
         });
@@ -217,8 +277,11 @@ mod tests {
         for line in [
             "",
             "nope",
-            "buffer\tx\ttext",
-            "buffer\t3",
+            "buffer\tx\t3\ttext",
+            "buffer\t1\tx\ttext",
+            "buffer\t1\t3",
+            "env\tKEY_WITHOUT_VALUE",
+            "alias",
             "hello\tpid\t\t",
             "focus\t2",
             "focus",
@@ -248,12 +311,39 @@ mod tests {
         assert_eq!(LinkMessage::Nothing.to_line(), "none\n");
         assert_eq!(
             LinkMessage::SetBuffer {
+                seq: Some(7),
                 cursor: 12,
                 text: "git checkout\n".into(),
                 execute: true,
             }
             .to_line(),
-            "set\t12\t1\tgit checkout\\n\n"
+            "set\t7\t12\t1\tgit checkout\\n\n"
         );
+        assert_eq!(
+            LinkMessage::SetBuffer {
+                seq: None,
+                cursor: 2,
+                text: "ls".into(),
+                execute: false,
+            }
+            .to_line(),
+            "set\t\t2\t0\tls\n"
+        );
+        assert_eq!(
+            LinkMessage::Ghost {
+                buffer: "git ch".into(),
+                suffix: "eckout\t".into(),
+            }
+            .to_line(),
+            "ghost\tgit ch\teckout\\t\n"
+        );
+        assert_eq!(
+            LinkMessage::Bind {
+                keys: vec!["enter".into(), "shift+tab".into()]
+            }
+            .to_line(),
+            "bind\tenter\tshift+tab\n"
+        );
+        assert_eq!(LinkMessage::Bind { keys: vec![] }.to_line(), "bind\n");
     }
 }

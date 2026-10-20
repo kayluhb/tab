@@ -186,6 +186,23 @@ impl KeyInterceptor {
         self.mappings.insert(binding, identifier);
     }
 
+    /// Every key bound to an action, and Tab if it shows the popup
+    pub fn bound_keys(&self) -> Vec<KeyEvent> {
+        let mut keys: Vec<KeyEvent> = self
+            .mappings
+            .iter()
+            .filter(|mapping| mapping.value() != IGNORE_ACTION)
+            .map(|mapping| mapping.key().clone())
+            .collect();
+        if *ONLY_SHOW_ON_TAB {
+            keys.push(KeyEvent {
+                key: KeyCode::Tab,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        keys
+    }
+
     pub fn reset(&mut self) {
         trace!("Resetting key interceptor");
         self.intercept_global = false;

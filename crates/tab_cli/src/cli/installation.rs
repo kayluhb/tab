@@ -111,6 +111,8 @@ pub async fn install_cli(
         println!("you must enable our Input Method integration.");
         println!();
         println!("To enable the integration, select \"yes\" below and then click Ok in the popup.");
+        println!("If macOS opens Keyboard settings instead, click Edit... next to Input Sources, click +,");
+        println!("select TabInputMethod under English and click Add. Setup finishes once it is added.");
         println!();
 
         match choose("Do you want to enable support for input method backed terminals?", &[

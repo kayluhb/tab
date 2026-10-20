@@ -22,6 +22,9 @@ function fig_osc { printf "\033]697;$1\007" "${@:2}"; }
 TAB_HAS_SET_PROMPT=0
 
 fig_preexec() {
+  # No-PTY mode never wraps the prompt, and no PTY reads the markers
+  _tab_link_active && return
+
   # Restore user defined prompt before executing.
   if [ -n "${PS1+x}" ]; then
     PS1="$TAB_USER_PS1"
@@ -79,6 +82,10 @@ fig_precmd() {
 
   fig_reset_hooks
   _tab_link_prompt "$LAST_STATUS"
+  # No-PTY mode: the link socket already has the prompt, cwd, exit code, env
+  # and aliases. The OSC markers and prompt wrapping below are only read by the
+  # PTY tabterm.
+  _tab_link_active && return
 
   fig_osc "OSCUnlock=%s" "${TABTERM_SESSION_ID}"
   fig_osc "Dir=%s" "$PWD"
@@ -191,4 +198,7 @@ fi
 
 fi
 
-(command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+# no_pty.zsh, which defines _tab_link_active, is sourced after this file
+if [[ "${TABTERM_MODE:-}" != no-pty ]]; then
+  (command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+fi

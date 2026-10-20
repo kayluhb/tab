@@ -1,6 +1,7 @@
 //! What tabterm knows about the shell in no-PTY mode. The shell reports its own
 //! state, so this replaces what PTY mode reads off the screen.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::str::Chars;
 use std::time::SystemTime;
@@ -10,6 +11,11 @@ use tab_proto::figterm::InsertTextRequest;
 use tab_proto::local::ShellContext;
 use tab_util::Terminal as FigTerminal;
 
+use crate::input::{
+    KeyCode,
+    KeyEvent,
+    Modifiers,
+};
 use crate::interceptor::{
     KeyInterceptor,
     key_from_text,
@@ -39,9 +45,13 @@ pub struct Session {
     pub buffer: String,
     /// Cursor position in characters
     pub cursor: usize,
+    /// The shell's number for the last buffer it reported
+    pub seq: u64,
     pub interceptor: KeyInterceptor,
     /// The running command and when it started, for history
     running: Option<(String, SystemTime)>,
+    /// The keys the shell was last told to bind
+    bound_keys: Option<BTreeSet<String>>,
 }
 
 impl Session {
@@ -55,8 +65,10 @@ impl Session {
             preexec: false,
             buffer: String::new(),
             cursor: 0,
+            seq: 0,
             interceptor,
             running: None,
+            bound_keys: None,
         }
     }
 
@@ -181,6 +193,41 @@ impl Session {
         Some(action)
     }
 
+    /// The keys the shell should bind, by the names it reports them with. A lone Esc
+    /// also starts other keys, so while it is bound zsh waits `KEYTIMEOUT` after every
+    /// Esc; it is bound only while the popup would take it.
+    pub fn shell_keys(&self) -> BTreeSet<String> {
+        let mut keys: BTreeSet<String> = self
+            .interceptor
+            .bound_keys()
+            .iter()
+            .filter_map(shell_key_name)
+            .collect();
+        let esc = KeyEvent {
+            key: KeyCode::Escape,
+            modifiers: Modifiers::NONE,
+        };
+        if self.preexec || self.interceptor.intercept_key(&esc).is_none() {
+            keys.remove("esc");
+        }
+        keys
+    }
+
+    /// The keys to bind, if they changed since the shell was last told
+    pub fn take_bind_update(&mut self) -> Option<BTreeSet<String>> {
+        let keys = self.shell_keys();
+        if self.bound_keys.as_ref() == Some(&keys) {
+            return None;
+        }
+        self.bound_keys = Some(keys.clone());
+        Some(keys)
+    }
+
+    /// A new shell connection binds nothing yet
+    pub fn forget_bound_keys(&mut self) {
+        self.bound_keys = None;
+    }
+
     pub fn start_command(&mut self, command: String) {
         self.preexec = true;
         self.interceptor.reset();
@@ -215,9 +262,49 @@ impl Session {
     }
 }
 
-/// Whether the desktop answers an intercepted action by changing the buffer
-pub fn action_inserts(action: &str) -> bool {
-    action.starts_with("insert") || action == "execute"
+/// Whether the key widget should wait for the desktop's insert for this action. Only
+/// a widget can run the line, so it waits for the actions that always insert and can
+/// run it. The common-prefix actions insert nothing when there is no common prefix
+/// (the popup shakes, as in PTY mode); their inserts come through the push handler,
+/// so a Tab with nothing to insert does not stall the shell.
+pub fn action_awaits_insert(action: &str) -> bool {
+    matches!(
+        action,
+        "insertSelected" | "insertSelectedAndExecute" | "insertCommonPrefixOrInsertSelected" | "execute"
+    )
+}
+
+/// The name the shell reports a key with (see `_tab_link_init_keys` in no_pty.zsh), if
+/// the shell can bind it. Keys a terminal sends no sequence for, like command+i or
+/// control+1, have none.
+fn shell_key_name(event: &KeyEvent) -> Option<String> {
+    let name = match (event.key, event.modifiers) {
+        (KeyCode::Char(letter), Modifiers::CTRL) if letter.is_ascii_alphabetic() => {
+            return Some(format!("control+{}", letter.to_ascii_lowercase()));
+        },
+        (KeyCode::Char(letter), Modifiers::ALT) if letter.is_ascii_alphabetic() => {
+            return Some(format!("option+{}", letter.to_ascii_lowercase()));
+        },
+        (KeyCode::Tab, Modifiers::SHIFT) => "shift+tab",
+        (key, Modifiers::NONE) => match key {
+            KeyCode::Tab => "tab",
+            KeyCode::Enter => "enter",
+            KeyCode::Escape => "esc",
+            KeyCode::UpArrow | KeyCode::ApplicationUpArrow => "up",
+            KeyCode::DownArrow | KeyCode::ApplicationDownArrow => "down",
+            KeyCode::LeftArrow | KeyCode::ApplicationLeftArrow => "left",
+            KeyCode::RightArrow | KeyCode::ApplicationRightArrow => "right",
+            KeyCode::Home => "home",
+            KeyCode::End => "end",
+            KeyCode::PageUp => "pageup",
+            KeyCode::PageDown => "pagedown",
+            KeyCode::Backspace => "backspace",
+            KeyCode::Delete => "delete",
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(name.into())
 }
 
 fn whoami_hostname() -> Option<String> {
@@ -563,24 +650,134 @@ mod tests {
     }
 
     #[test]
-    fn knows_which_actions_insert() {
+    fn knows_which_actions_await_an_insert() {
         for action in [
             "insertSelected",
-            "insertCommonPrefix",
-            "insertCommonPrefixOrNavigateDown",
             "insertSelectedAndExecute",
+            "insertCommonPrefixOrInsertSelected",
             "execute",
         ] {
-            assert!(action_inserts(action), "{action}");
+            assert!(action_awaits_insert(action), "{action}");
         }
         for action in [
+            "insertCommonPrefix",
+            "insertCommonPrefixOrNavigateDown",
             "navigateDown",
             "navigateUp",
             "hideAutocomplete",
             "toggleDescription",
             "toggleHistoryMode",
         ] {
-            assert!(!action_inserts(action), "{action}");
+            assert!(!action_awaits_insert(action), "{action}");
+        }
+    }
+
+    fn action(identifier: &str, bindings: &[&str]) -> Action {
+        Action {
+            identifier: identifier.into(),
+            bindings: bindings.iter().map(|&binding| binding.into()).collect(),
+        }
+    }
+
+    #[test]
+    fn names_the_keys_the_shell_can_bind() {
+        let mut s = session("", 0);
+        s.interceptor.set_actions(
+            &[
+                action("insertSelected", &["enter"]),
+                action("navigateUp", &["shift+tab", "up", "control+K", "ctrl+p"]),
+                action("navigateDown", &["arrowdown", "option+j"]),
+                action("selectSuggestion1", &["control+1"]),
+                action("toggleDescription", &["command+i"]),
+                action("ignore", &["control+n"]),
+            ],
+            true,
+        );
+        let keys: Vec<String> = s.shell_keys().into_iter().collect();
+        assert_eq!(keys, [
+            "control+k",
+            "control+p",
+            "down",
+            "enter",
+            "option+j",
+            "shift+tab",
+            "up"
+        ]);
+    }
+
+    #[test]
+    fn binds_esc_only_while_the_popup_takes_it() {
+        let mut s = session("git ch", 6);
+        s.interceptor.set_actions(
+            &[
+                action("hideAutocomplete", &["esc"]),
+                action("insertSelected", &["enter"]),
+            ],
+            true,
+        );
+        assert!(!s.shell_keys().contains("esc"));
+        assert!(s.take_bind_update().is_some());
+        assert!(s.take_bind_update().is_none(), "unchanged");
+
+        s.interceptor.set_intercept(true);
+        s.interceptor.set_window_visible(true);
+        assert!(s.take_bind_update().unwrap().contains("esc"));
+
+        // Esc hides the popup and releases its keys
+        assert_eq!(s.intercept("esc").as_deref(), Some("hideAutocomplete"));
+        let keys = s.take_bind_update().unwrap();
+        assert!(!keys.contains("esc"));
+        assert!(keys.contains("enter"), "still bound, to ask when pressed");
+
+        s.forget_bound_keys();
+        assert_eq!(s.take_bind_update(), Some(keys), "a new connection gets the keys again");
+    }
+
+    #[test]
+    fn releases_esc_while_a_command_runs() {
+        let mut s = session("ls", 2);
+        s.interceptor.set_actions(
+            &[
+                action("hideAutocomplete", &["esc"]),
+                action("insertSelected", &["enter"]),
+            ],
+            true,
+        );
+        s.start_command("ls".into());
+        s.interceptor.set_intercept(true);
+        s.interceptor.set_window_visible(true);
+        let keys = s.shell_keys();
+        assert!(!keys.contains("esc"));
+        assert!(keys.contains("enter"));
+    }
+
+    #[test]
+    fn names_each_unmodified_key() {
+        for (key, name) in [
+            (KeyCode::Tab, Some("tab")),
+            (KeyCode::Enter, Some("enter")),
+            (KeyCode::Escape, Some("esc")),
+            (KeyCode::UpArrow, Some("up")),
+            (KeyCode::ApplicationUpArrow, Some("up")),
+            (KeyCode::DownArrow, Some("down")),
+            (KeyCode::ApplicationDownArrow, Some("down")),
+            (KeyCode::LeftArrow, Some("left")),
+            (KeyCode::ApplicationLeftArrow, Some("left")),
+            (KeyCode::RightArrow, Some("right")),
+            (KeyCode::ApplicationRightArrow, Some("right")),
+            (KeyCode::Home, Some("home")),
+            (KeyCode::End, Some("end")),
+            (KeyCode::PageUp, Some("pageup")),
+            (KeyCode::PageDown, Some("pagedown")),
+            (KeyCode::Backspace, Some("backspace")),
+            (KeyCode::Delete, Some("delete")),
+            (KeyCode::Char('a'), None),
+        ] {
+            let event = KeyEvent {
+                key,
+                modifiers: Modifiers::NONE,
+            };
+            assert_eq!(shell_key_name(&event).as_deref(), name, "{key:?}");
         }
     }
 

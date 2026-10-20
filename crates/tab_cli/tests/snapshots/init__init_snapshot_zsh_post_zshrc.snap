@@ -1,6 +1,5 @@
 ---
 source: crates/tab_cli/tests/init.rs
-assertion_line: 94
 expression: init
 ---
 TAB_SHELL='/bin/zsh'
@@ -28,6 +27,9 @@ function fig_osc { printf "\033]697;$1\007" "${@:2}"; }
 TAB_HAS_SET_PROMPT=0
 
 fig_preexec() {
+  # No-PTY mode never wraps the prompt, and no PTY reads the markers
+  _tab_link_active && return
+
   # Restore user defined prompt before executing.
   if [ -n "${PS1+x}" ]; then
     PS1="$TAB_USER_PS1"
@@ -85,6 +87,10 @@ fig_precmd() {
 
   fig_reset_hooks
   _tab_link_prompt "$LAST_STATUS"
+  # No-PTY mode: the link socket already has the prompt, cwd, exit code, env
+  # and aliases. The OSC markers and prompt wrapping below are only read by the
+  # PTY tabterm.
+  _tab_link_active && return
 
   fig_osc "OSCUnlock=%s" "${TABTERM_SESSION_ID}"
   fig_osc "Dir=%s" "$PWD"
@@ -197,7 +203,10 @@ fi
 
 fi
 
-(command tab _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+# no_pty.zsh, which defines _tab_link_active, is sourced after this file
+if [[ "${TABTERM_MODE:-}" != no-pty ]]; then
+  (command tab _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+fi
 # zsh-only code, which shellcheck reads as bash: expansion flags, assoc array literals
 # shellcheck disable=SC2034,SC2066,SC2190,SC2296,SC2298
 if [[ -n "${ZSH_NAME:-}" ]]; then
@@ -205,10 +214,24 @@ if [[ -n "${ZSH_NAME:-}" ]]; then
 # No-PTY mode: tabterm runs in the background and zsh reports to it over a
 # socket, so nothing sits between the terminal and the shell. pre.sh starts it
 # and sets TABTERM_MODE=no-pty and TABTERM_LINK_SOCKET. The protocol is in
-# crates/tabterm/src/no_pty/protocol.rs.
+# crates/tabterm/src/no_pty/protocol.rs. Lines with text are read with `IFS=`,
+# or read would strip spaces at the ends of the text.
 
-typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
-typeset -gA _tab_link_fallback _tab_link_key_name
+# The connection state. Kept if this file is sourced again (e.g. `source
+# ~/.zshrc`), so the shell keeps its connection instead of opening a second one.
+# Set only on the first source, which a function marks: the environment cannot
+# hold a function, so a value imported from the environment is never used.
+if (( ! ${+functions[_tab_link_connect]} )); then
+  typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
+  typeset -g _tab_link_env_sent="" _tab_link_alias_sent="" _tab_link_focus_on=""
+  # Counts buffer reports; tabterm tags each insert with the one it was computed from
+  typeset -gi _tab_link_seq=0
+fi
+# _tab_link_key_name: key sequence -> the name tabterm knows the key by.
+# _tab_link_fallback: keymap:sequence -> the widget the key had before tabterm
+# bound it ('' where that keymap is the same as main). _tab_link_bound: the
+# names bound now.
+typeset -gA _tab_link_fallback _tab_link_key_name _tab_link_bound
 
 _tab_link_active() {
   [[ "${TABTERM_MODE:-}" == no-pty && -n "${TABTERM_LINK_SOCKET:-}" ]]
@@ -228,20 +251,27 @@ _tab_link_disconnect() {
   fi
   [[ -n "$_tab_link_fd" ]] && exec {_tab_link_fd}>&-
   _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
+  _tab_link_env_sent="" _tab_link_alias_sent=""
+  _tab_link_ghost_buffer="" _tab_link_ghost_suffix=""
+  # Give the popup's keys back: no `bind` line can release them now. tabterm
+  # sends the full set again on the next connection.
+  (( ${#_tab_link_bound} )) && _tab_link_bind
+  return 0
 }
 
 _tab_link_connect() {
   [[ -n "$_tab_link_fd" ]] && return 0
   _tab_link_active || return 1
-  [[ -S "$TABTERM_LINK_SOCKET" ]] || return 1
-  zmodload zsh/net/socket 2>/dev/null || return 1
+  # Only a socket this user owns: tabterm made it in a private folder
+  [[ -S "$TABTERM_LINK_SOCKET" && -O "$TABTERM_LINK_SOCKET" ]] || return 1
+  zmodload zsh/net/socket zsh/zselect 2>/dev/null || return 1
 
   zsocket "$TABTERM_LINK_SOCKET" 2>/dev/null || return 1
   _tab_link_fd=$REPLY
   if zsocket "$TABTERM_LINK_SOCKET" 2>/dev/null; then
     _tab_link_push_fd=$REPLY
     print -r -u "$_tab_link_push_fd" -- push
-    zle -F -w "$_tab_link_push_fd" tab-link-on-push 2>/dev/null
+    zle -F -w "$_tab_link_push_fd" _tab_link_on_push 2>/dev/null
   fi
 
   _tab_link_escape "${TTY:-}"
@@ -250,21 +280,65 @@ _tab_link_connect() {
   _tab_link_send "hello"$'\t'"$$"$'\t'"$tty"$'\t'"$REPLY"
 }
 
-# Sends one line; drops the connection if tabterm is gone
+# Sends one line; drops the connection if tabterm is gone. Never blocks the
+# shell if tabterm stopped reading: zselect -w only promises room for the
+# socket's low-water mark (2 KB), so the line goes in chunks of at most that,
+# checking each time. A line that cannot start is dropped; one cut off partway
+# drops the connection, as the rest of the protocol would be out of step.
 _tab_link_send() {
   [[ -n "$_tab_link_fd" ]] || return 1
-  if ! print -r -u "$_tab_link_fd" -- "$1" 2>/dev/null; then
-    _tab_link_disconnect
-    return 1
-  fi
+  local line=$1$'\n'
+  local -a ready
+  local -i i
+  # 512 characters is at most 2 KB of UTF-8
+  for (( i = 1; i <= ${#line}; i += 512 )); do
+    if ! zselect -t 0 -a ready -w "$_tab_link_fd" 2>/dev/null; then
+      (( i > 1 )) && _tab_link_disconnect
+      return 1
+    fi
+    if ! print -rn -u "$_tab_link_fd" -- "${line[i,i+511]}" 2>/dev/null; then
+      _tab_link_disconnect
+      return 1
+    fi
+  done
 }
 
 # Text the next line should start with (e.g. a shell started with initial text).
 # precmd cannot edit the line, so zle-line-init applies it.
 typeset -g _tab_link_start_text="" _tab_link_start_run=""
 
+# Sends the exported environment and the aliases, each only when it changed
+# since it was last sent. Built in the shell, with no process or subshell.
+_tab_link_send_context() {
+  local key line="env"
+  for key in ${(ko)parameters[(R)*export*]}; do
+    _tab_link_escape "$key"
+    line+=$'\t'"$REPLY"
+    _tab_link_escape "${(P)key}"
+    line+=$'\t'"$REPLY"
+  done
+  if [[ "$line" != "$_tab_link_env_sent" ]] && _tab_link_send "$line"; then
+    _tab_link_env_sent=$line
+  fi
+
+  # The same `name=value` lines `alias` prints
+  local -a lines
+  for key in ${(ko)aliases}; do
+    lines+=("$key=${(q-)aliases[$key]}")
+  done
+  for key in ${(ko)galiases}; do
+    lines+=("$key=${(q-)galiases[$key]}")
+  done
+  _tab_link_escape "${(pj:\n:)lines}"
+  line="alias"$'\t'"$REPLY"
+  if [[ "$line" != "$_tab_link_alias_sent" ]] && _tab_link_send "$line"; then
+    _tab_link_alias_sent=$line
+  fi
+}
+
 _tab_link_prompt() {
   _tab_link_connect || return
+  _tab_link_send_context
   _tab_link_escape "$PWD"
   _tab_link_send "prompt"$'\t'"$1"$'\t'"$REPLY" || return
   _tab_link_sent=""
@@ -273,7 +347,7 @@ _tab_link_prompt() {
   print -n $'\e[?1004h'
   _tab_link_focus_on=1
   local reply
-  read -r -u "$_tab_link_fd" -t 0.2 reply 2>/dev/null || return
+  IFS= read -r -u "$_tab_link_fd" -t 0.2 reply 2>/dev/null || return
   _tab_link_parse_set "$reply" || return
   _tab_link_start_text=$REPLY _tab_link_start_run=$_tab_link_set_execute
 }
@@ -285,8 +359,6 @@ _tab_link_line_init() {
   _tab_link_start_text=""
   [[ "$_tab_link_start_run" == 1 ]] && zle accept-line
 }
-
-typeset -g _tab_link_focus_on=""
 
 # Stops focus reporting, so commands never see the focus sequences
 _tab_link_focus_off() {
@@ -312,14 +384,17 @@ _tab_link_preexec() {
   _tab_link_send "preexec"$'\t'"$REPLY"
 }
 
-# Reports the buffer on every redraw that changed it
+# Reports the buffer on every redraw that changed it, while editing a command
+# line: not in vared or other zle contexts. ^R search runs no redraw hook, so
+# the line is reported once the search ends.
 _tab_link_report() {
-  [[ -n "$_tab_link_fd" ]] || return
+  [[ -n "$_tab_link_fd" ]] && [[ "$CONTEXT" == start || "$CONTEXT" == cont ]] || return
   local state="$CURSOR"$'\t'"$BUFFER"
   [[ "$state" == "$_tab_link_sent" ]] && return
-  _tab_link_sent=$state
+  (( ++_tab_link_seq ))
   _tab_link_escape "$BUFFER"
-  _tab_link_send "buffer"$'\t'"$CURSOR"$'\t'"$REPLY"
+  # A dropped report is sent again on the next redraw
+  _tab_link_send "buffer"$'\t'"$_tab_link_seq"$'\t'"$CURSOR"$'\t'"$REPLY" && _tab_link_sent=$state
 }
 
 # Bound to the keys the popup uses. Asks tabterm whether the popup takes the
@@ -334,11 +409,14 @@ _tab_link_key() {
   fi
   case "$reply" in
     $'key\t1\t1')
-      # Apply the insert here: only a widget can run the line
+      # Apply the insert here: only a widget can run the line. Ghost text or
+      # keys to bind may arrive before it on the same connection.
       local line
-      if [[ -n "$_tab_link_push_fd" ]] && read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; then
+      while [[ -n "$_tab_link_push_fd" ]] && IFS= read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; do
+        _tab_link_handle_push "$line" && continue
         _tab_link_apply "$line" && zle accept-line
-      fi
+        break
+      done
       return ;;
     $'key\t1\t0') return ;;
   esac
@@ -347,69 +425,205 @@ _tab_link_key() {
   [[ -n "$fallback" && "$fallback" != undefined-key ]] && zle "$fallback"
 }
 
-# Parses a `set` line: the text into REPLY, its cursor and execute flag into
-# _tab_link_set_cursor and _tab_link_set_execute. Fails for any other line.
-typeset -g _tab_link_set_cursor="" _tab_link_set_execute=""
+# Parses a `set` line: the text into REPLY, its seq, cursor and execute flag into
+# _tab_link_set_seq, _tab_link_set_cursor and _tab_link_set_execute. Fails for
+# any other line.
+typeset -g _tab_link_set_seq="" _tab_link_set_cursor="" _tab_link_set_execute=""
 _tab_link_parse_set() {
   local -a fields
   fields=("${(@ps:\t:)1}")
   [[ "${fields[1]}" == set ]] || return 1
-  _tab_link_set_cursor=${fields[2]} _tab_link_set_execute=${fields[3]}
-  local text=${(pj:\t:)fields[4,-1]}
-  # Undo the escapes, holding `\\` aside as NUL so `\\n` stays a backslash and an n
-  text=${text//\\\\/$'\0'}
-  text=${text//\\t/$'\t'}
-  text=${text//\\n/$'\n'}
-  REPLY=${text//$'\0'/\\}
+  _tab_link_set_seq=${fields[2]} _tab_link_set_cursor=${fields[3]} _tab_link_set_execute=${fields[4]}
+  _tab_link_unescape "${(pj:\t:)fields[5,-1]}"
 }
 
-# Sets the line from a `set` line; succeeds only if the line should run
+# Undoes _tab_link_escape into REPLY, holding `\\` aside as NUL so `\\n` stays
+# a backslash and an n
+_tab_link_unescape() {
+  REPLY=${1//\\\\/$'\0'}
+  REPLY=${REPLY//\\t/$'\t'}
+  REPLY=${REPLY//\\n/$'\n'}
+  REPLY=${REPLY//$'\0'/\\}
+}
+
+# Sets the line from a `set` line; succeeds only if the line should run. Drops
+# an insert computed for an older buffer, i.e. the user typed since.
 _tab_link_apply() {
   _tab_link_parse_set "$1" || return 1
+  [[ -z "$_tab_link_set_seq" || "$_tab_link_set_seq" == "$_tab_link_seq" ]] || return 1
   BUFFER=$REPLY
   CURSOR=$_tab_link_set_cursor
+  # Report the new line now, at the next seq, so a following insert lines up
+  _tab_link_report
   [[ "$_tab_link_set_execute" == 1 ]]
 }
 
-# Applies a buffer tabterm pushes while zsh is idle. zle does not finish a line
+# The popup's top suggestion, which the `specs` inline strategy reads
+typeset -g _tab_link_ghost_buffer="" _tab_link_ghost_suffix=""
+
+# Stores the suggestion from a `ghost` line, and redraws the ghost text if the
+# line still matches
+_tab_link_set_ghost() {
+  local -a fields
+  fields=("${(@ps:\t:)1}")
+  _tab_link_unescape "${fields[2]}"
+  _tab_link_ghost_buffer=$REPLY
+  _tab_link_unescape "${fields[3]}"
+  _tab_link_ghost_suffix=$REPLY
+  [[ "$_tab_link_ghost_buffer" == "$BUFFER" && " ${TAB_AUTOSUGGEST_STRATEGY[*]} " == *" specs "* ]] \
+    && _tab_link_refresh_ghost
+}
+
+# Redraws the inline suggestions plugin's ghost text for the line. The plugin
+# skips the push widget: its wrapper puts the old ghost text back whenever the
+# line did not change, which would hide a pushed suggestion.
+_tab_link_refresh_ghost() {
+  # shellcheck disable=SC2154
+  (( ${+widgets[autosuggest-fetch]} )) || return
+  zle autosuggest-clear
+  (( ${#BUFFER} && ! ${+_TAB_AUTOSUGGEST_DISABLED} )) && zle autosuggest-fetch
+}
+
+# Handles a pushed line other than a buffer: ghost text or keys to bind. Fails
+# for a buffer.
+_tab_link_handle_push() {
+  case "$1" in
+    # Handled whatever the helpers return, so the key widget keeps waiting
+    ghost$'\t'*) _tab_link_set_ghost "$1"; return 0 ;;
+    bind|bind$'\t'*) _tab_link_bind "${(@)${(@ps:\t:)1}[2,-1]}"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Handles a line tabterm pushes while zsh is idle. zle does not finish a line
 # from a -F handler, so a pushed `execute` waits for the next key.
 _tab_link_on_push() {
   local line
-  if ! read -r -u "$1" line 2>/dev/null; then
+  if ! IFS= read -r -u "$1" line 2>/dev/null; then
     _tab_link_disconnect
     return
   fi
-  _tab_link_apply "$line"
+  if ! _tab_link_handle_push "$line"; then
+    _tab_link_apply "$line"
+    _tab_link_refresh_ghost
+  fi
   zle -R
 }
 
-_tab_link_bind_keys() {
-  local -A names=(
+# Names the key sequences tabterm knows, as tabterm's no_pty/session.rs
+# names them
+_tab_link_init_keys() {
+  local -i code
+  local letter
+  # control+letter first, so the named keys win where they share a byte (^I, ^M)
+  for code in {1..26}; do
+    (( letter = code + 96 ))
+    letter=${(#)letter}
+    _tab_link_key_name[${(#)code}]=control+$letter
+    _tab_link_key_name[$'\e'$letter]=option+$letter
+  done
+  _tab_link_key_name+=(
     $'\t' tab
+    $'\e[Z' shift+tab
     $'\r' enter
     $'\e' esc
     $'\e[A' up
     $'\eOA' up
     $'\e[B' down
     $'\eOB' down
-    $'\e[Z' shift+tab
-    $'\C-p' control+p
-    $'\C-n' control+n
-    $'\C-k' control+k
-    $'\C-r' control+r
+    $'\e[C' right
+    $'\eOC' right
+    $'\e[D' left
+    $'\eOD' left
+    $'\e[H' home
+    $'\eOH' home
+    $'\e[F' end
+    $'\eOF' end
+    $'\e[5~' pageup
+    $'\e[6~' pagedown
+    $'\x7f' backspace
+    $'\e[3~' delete
   )
-  local keymap seq binding
-  for keymap in main emacs viins; do
-    for seq in "${(@k)names}"; do
-      binding=${${(z)$(bindkey -M "$keymap" -- "$seq" 2>/dev/null)}[2]}
-      [[ "$binding" == tab-link-key ]] && continue
-      _tab_link_fallback[$keymap:$seq]=$binding
-      bindkey -M "$keymap" -- "$seq" tab-link-key
-    done
-  done
-  _tab_link_key_name=("${(@kv)names}")
+}
 
-  # Focus reports, bound in every keymap so they never insert text
+# Binds the keys a `bind` line names, so pressing one asks tabterm, and gives
+# every other key back the widget it had. Runs from the push handler, where a
+# changed binding applies from the next key. Looks up each key's own widget only
+# the first time, as that costs a process.
+_tab_link_bind() {
+  local -A want
+  local name seq keymap binding
+  local -a keymaps=(main emacs viins)
+  for name in "$@"; do
+    want[$name]=1
+  done
+
+  for name in "${(@k)_tab_link_bound}"; do
+    (( ${+want[$name]} )) && continue
+    for seq in "${(@k)_tab_link_key_name[(R)$name]}"; do
+      for keymap in "${keymaps[@]}"; do
+        binding=${_tab_link_fallback[$keymap:$seq]}
+        if [[ -z "$binding" ]]; then
+          continue
+        elif [[ "$binding" == undefined-key ]]; then
+          bindkey -M "$keymap" -r -- "$seq"
+        else
+          bindkey -M "$keymap" -- "$seq" "$binding"
+        fi
+      done
+    done
+    unset "_tab_link_bound[$name]"
+  done
+
+  for name in "${(@k)want}"; do
+    (( ${+_tab_link_bound[$name]} )) && continue
+    for seq in "${(@k)_tab_link_key_name[(R)$name]}"; do
+      for keymap in "${keymaps[@]}"; do
+        if (( ! ${+_tab_link_fallback[$keymap:$seq]} )); then
+          binding=${${(z)$(bindkey -M "$keymap" -- "$seq" 2>/dev/null)}[2]}
+          # Already ours: this keymap is main, which was just bound
+          [[ "$binding" == tab-link-key ]] && binding=""
+          _tab_link_fallback[$keymap:$seq]=$binding
+        fi
+        [[ -n "${_tab_link_fallback[$keymap:$seq]}" ]] && bindkey -M "$keymap" -- "$seq" tab-link-key
+      done
+    done
+    _tab_link_bound[$name]=1
+  done
+}
+
+# Binds the popup's keys again when this file is sourced again: .zshrc can
+# rebind a key and drop ours, and tabterm sends `bind` only when the keys
+# change. Forgets the widget a key had where the key is not ours now, so the
+# key gives back the user's new widget. A keymap that was main ('') gets main's
+# widget, as main can be another keymap now (e.g. after `bindkey -v`). Looks up
+# all the keys in one process.
+_tab_link_rebind() {
+  local -a names=("${(@k)_tab_link_bound}") entries=("${(@k)_tab_link_fallback}") lines
+  local -A old=("${(@kv)_tab_link_fallback}")
+  local -i i
+  local entry binding
+  (( ${#names} )) || return 0
+  # One line per entry, x where bindkey fails, so the lines stay in step
+  lines=("${(@f)$(for entry in "${entries[@]}"; do
+    bindkey -M "${entry%%:*}" -- "${entry#*:}" 2>/dev/null || print x
+  done)}")
+  for (( i = 1; i <= ${#entries}; i++ )); do
+    entry=${entries[i]}
+    binding=${${(z)lines[i]}[2]}
+    if [[ "$binding" != tab-link-key ]]; then
+      unset "_tab_link_fallback[$entry]"
+    elif [[ -z "${old[$entry]}" ]]; then
+      _tab_link_fallback[$entry]=${old[main:${entry#*:}]}
+    fi
+  done
+  _tab_link_bound=()
+  _tab_link_bind "${names[@]}"
+}
+
+# Focus reports, bound in every keymap so they never insert text
+_tab_link_bind_focus() {
+  local keymap
   for keymap in main emacs viins vicmd; do
     bindkey -M "$keymap" -- $'\e[O' _tab_link_focus_out
     bindkey -M "$keymap" -- $'\e[I' _tab_link_focus_in
@@ -417,19 +631,25 @@ _tab_link_bind_keys() {
 }
 
 if _tab_link_active; then
-  # Widget names without a leading underscore, so the inline suggestions plugin
-  # wraps them and refreshes its ghost text when they change the line
+  # No leading underscore, so the inline suggestions plugin wraps the key widget
+  # and refreshes its ghost text when it changes the line. The push widget has
+  # one, so the plugin skips it; it refreshes the ghost text itself.
   zle -N tab-link-key _tab_link_key
-  zle -N tab-link-on-push _tab_link_on_push
+  zle -N _tab_link_on_push
   zle -N _tab_link_focus_out
   zle -N _tab_link_focus_in
   autoload -Uz add-zle-hook-widget
   add-zle-hook-widget line-pre-redraw _tab_link_report
   add-zle-hook-widget line-init _tab_link_line_init
-  # Its own hook, not fig_preexec: fig_precmd also calls that after ^C, with no command
-  preexec_functions+=(_tab_link_preexec)
-  zshexit_functions+=(_tab_link_focus_off)
-  _tab_link_bind_keys
+  # Its own hook: fig_preexec does nothing in no-PTY mode. add-zsh-hook adds
+  # each hook once, so sourcing this file again adds no copy.
+  autoload -Uz add-zsh-hook
+  add-zsh-hook preexec _tab_link_preexec
+  add-zsh-hook zshexit _tab_link_focus_off
+  # The popup's keys are bound when tabterm sends them, once connected
+  _tab_link_init_keys
+  _tab_link_rebind
+  _tab_link_bind_focus
 fi
 
 fi
