@@ -204,7 +204,8 @@ if [[ -n "${ZSH_NAME:-}" ]]; then
 # No-PTY mode: tabterm runs in the background and zsh reports to it over a
 # socket, so nothing sits between the terminal and the shell. pre.sh starts it
 # and sets TABTERM_MODE=no-pty and TABTERM_LINK_SOCKET. The protocol is in
-# crates/tabterm/src/no_pty/protocol.rs.
+# crates/tabterm/src/no_pty/protocol.rs. Lines with text are read with `IFS=`,
+# or read would strip spaces at the ends of the text.
 
 typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
 # Counts buffer reports; tabterm tags each insert with the one it was computed from
@@ -274,7 +275,7 @@ _tab_link_prompt() {
   print -n $'\e[?1004h'
   _tab_link_focus_on=1
   local reply
-  read -r -u "$_tab_link_fd" -t 0.2 reply 2>/dev/null || return
+  IFS= read -r -u "$_tab_link_fd" -t 0.2 reply 2>/dev/null || return
   _tab_link_parse_set "$reply" || return
   _tab_link_start_text=$REPLY _tab_link_start_run=$_tab_link_set_execute
 }
@@ -338,7 +339,7 @@ _tab_link_key() {
     $'key\t1\t1')
       # Apply the insert here: only a widget can run the line
       local line
-      if [[ -n "$_tab_link_push_fd" ]] && read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; then
+      if [[ -n "$_tab_link_push_fd" ]] && IFS= read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; then
         _tab_link_apply "$line" && zle accept-line
       fi
       return ;;
@@ -382,7 +383,7 @@ _tab_link_apply() {
 # from a -F handler, so a pushed `execute` waits for the next key.
 _tab_link_on_push() {
   local line
-  if ! read -r -u "$1" line 2>/dev/null; then
+  if ! IFS= read -r -u "$1" line 2>/dev/null; then
     _tab_link_disconnect
     return
   fi
