@@ -47,6 +47,7 @@ use tab_proto::figterm::{
     FigtermRequestMessage,
     FigtermResponseMessage,
 };
+use tab_proto::local::EnvironmentVariable;
 use tab_proto::remote::{
     Clientbound,
     Hostbound,
@@ -283,6 +284,17 @@ fn handle_shell_message(
             session.shell_path = shell_path;
         },
         ShellMessage::Push => {},
+        // Kept where the PTY mode's UpdateShellContext keeps them
+        ShellMessage::Env(pairs) => {
+            *SHELL_ENVIRONMENT_VARIABLES.lock().unwrap() = pairs
+                .into_iter()
+                .map(|(key, value)| EnvironmentVariable {
+                    key,
+                    value: Some(value),
+                })
+                .collect();
+        },
+        ShellMessage::Alias(alias) => *SHELL_ALIAS.lock().unwrap() = Some(alias),
         ShellMessage::Prompt { exit_code, cwd } => {
             let cwd = PathBuf::from(cwd);
             if cwd.is_dir() {

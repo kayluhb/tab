@@ -31,6 +31,7 @@ _tab_link_disconnect() {
   fi
   [[ -n "$_tab_link_fd" ]] && exec {_tab_link_fd}>&-
   _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
+  _tab_link_env_sent="" _tab_link_alias_sent=""
 }
 
 _tab_link_connect() {
@@ -66,8 +67,40 @@ _tab_link_send() {
 # precmd cannot edit the line, so zle-line-init applies it.
 typeset -g _tab_link_start_text="" _tab_link_start_run=""
 
+typeset -g _tab_link_env_sent="" _tab_link_alias_sent=""
+
+# Sends the exported environment and the aliases, each only when it changed
+# since it was last sent. Built in the shell, with no process or subshell.
+_tab_link_send_context() {
+  local key line="env"
+  for key in ${(ko)parameters[(R)*export*]}; do
+    _tab_link_escape "$key"
+    line+=$'\t'"$REPLY"
+    _tab_link_escape "${(P)key}"
+    line+=$'\t'"$REPLY"
+  done
+  if [[ "$line" != "$_tab_link_env_sent" ]] && _tab_link_send "$line"; then
+    _tab_link_env_sent=$line
+  fi
+
+  # The same `name=value` lines `alias` prints
+  local -a lines
+  for key in ${(ko)aliases}; do
+    lines+=("$key=${(q-)aliases[$key]}")
+  done
+  for key in ${(ko)galiases}; do
+    lines+=("$key=${(q-)galiases[$key]}")
+  done
+  _tab_link_escape "${(pj:\n:)lines}"
+  line="alias"$'\t'"$REPLY"
+  if [[ "$line" != "$_tab_link_alias_sent" ]] && _tab_link_send "$line"; then
+    _tab_link_alias_sent=$line
+  fi
+}
+
 _tab_link_prompt() {
   _tab_link_connect || return
+  _tab_link_send_context
   _tab_link_escape "$PWD"
   _tab_link_send "prompt"$'\t'"$1"$'\t'"$REPLY" || return
   _tab_link_sent=""

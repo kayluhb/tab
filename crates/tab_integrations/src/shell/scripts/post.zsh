@@ -166,7 +166,8 @@ fig_precmd() {
 
   TAB_HAS_SET_PROMPT=1
 
-  if command -v {{CLI_BINARY_NAME}} >/dev/null 2>&1; then
+  # In no-PTY mode the shell sends its env and aliases over the link socket
+  if ! _tab_link_active && command -v {{CLI_BINARY_NAME}} >/dev/null 2>&1; then
     (command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
   fi
 }
@@ -191,4 +192,7 @@ fi
 
 fi
 
-(command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+# no_pty.zsh, which defines _tab_link_active, is sourced after this file
+if [[ "${TABTERM_MODE:-}" != no-pty ]]; then
+  (command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+fi
