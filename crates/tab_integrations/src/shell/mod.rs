@@ -809,6 +809,58 @@ mod test {
         }
     }
 
+    /// A login zsh sources pre.sh from both .zprofile and .zshrc. The second source must reuse the
+    /// no-PTY tabterm the first one started.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_pre_starts_one_no_pty_tabterm_when_sourced_twice() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if Command::new("zsh").arg("--version").output().is_err() {
+            eprintln!("zsh not found, skipping");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let launches = dir.path().join("launches");
+
+        let write_exe = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_exe(CLI_BINARY_NAME, "[ \"$2\" = get-shell ] && echo /bin/zsh\nexit 0");
+        write_exe(
+            PTY_BINARY_NAME,
+            &format!(
+                "echo launch >> '{}'\nprintf 'session\\n/tmp/link.sock\\n'",
+                launches.display()
+            ),
+        );
+
+        let pre = dir.path().join("pre.sh");
+        std::fs::write(&pre, Shell::Zsh.get_fig_integration_source(&When::Pre)).unwrap();
+
+        // pre.sh only starts tabterm when stdout is a terminal.
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let status = Command::new("zsh")
+            .args(["-f", "-i", "-c", r#"source "$1"; source "$1""#, "zsh"])
+            .arg(&pre)
+            .env_clear()
+            .env("HOME", dir.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::from(pty.slave))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let launches = std::fs::read_to_string(&launches).unwrap_or_default();
+        assert_eq!(launches.lines().count(), 1, "tabterm launches:\n{launches}");
+    }
+
     #[test]
     fn shellcheck_bash_pre() {
         check_script(Shell::Bash, When::Pre);
