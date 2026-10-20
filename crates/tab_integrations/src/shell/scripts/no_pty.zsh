@@ -39,7 +39,7 @@ _tab_link_connect() {
   _tab_link_active || return 1
   # Only a socket this user owns: tabterm made it in a private folder
   [[ -S "$TABTERM_LINK_SOCKET" && -O "$TABTERM_LINK_SOCKET" ]] || return 1
-  zmodload zsh/net/socket 2>/dev/null || return 1
+  zmodload zsh/net/socket zsh/zselect 2>/dev/null || return 1
 
   zsocket "$TABTERM_LINK_SOCKET" 2>/dev/null || return 1
   _tab_link_fd=$REPLY
@@ -55,9 +55,12 @@ _tab_link_connect() {
   _tab_link_send "hello"$'\t'"$$"$'\t'"$tty"$'\t'"$REPLY"
 }
 
-# Sends one line; drops the connection if tabterm is gone
+# Sends one line; drops the connection if tabterm is gone. If tabterm stopped
+# reading and the socket is full, drops the line instead of blocking the shell.
 _tab_link_send() {
   [[ -n "$_tab_link_fd" ]] || return 1
+  local -a ready
+  zselect -t 0 -a ready -w "$_tab_link_fd" 2>/dev/null || return 1
   if ! print -r -u "$_tab_link_fd" -- "$1" 2>/dev/null; then
     _tab_link_disconnect
     return 1
@@ -156,10 +159,10 @@ _tab_link_report() {
   [[ -n "$_tab_link_fd" ]] && [[ "$CONTEXT" == start || "$CONTEXT" == cont ]] || return
   local state="$CURSOR"$'\t'"$BUFFER"
   [[ "$state" == "$_tab_link_sent" ]] && return
-  _tab_link_sent=$state
   (( ++_tab_link_seq ))
   _tab_link_escape "$BUFFER"
-  _tab_link_send "buffer"$'\t'"$_tab_link_seq"$'\t'"$CURSOR"$'\t'"$REPLY"
+  # A dropped report is sent again on the next redraw
+  _tab_link_send "buffer"$'\t'"$_tab_link_seq"$'\t'"$CURSOR"$'\t'"$REPLY" && _tab_link_sent=$state
 }
 
 # Bound to the keys the popup uses. Asks tabterm whether the popup takes the
