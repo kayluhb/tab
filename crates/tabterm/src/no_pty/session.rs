@@ -2,6 +2,7 @@
 //! state, so this replaces what PTY mode reads off the screen.
 
 use std::path::PathBuf;
+use std::str::Chars;
 use std::time::SystemTime;
 
 use alacritty_terminal::term::CommandInfo;
@@ -108,15 +109,16 @@ impl Session {
         }
 
         // A PTY runs the line on a newline, which is how the popup passes Enter through.
-        // Keys after it would go to the next prompt, so they are dropped.
+        // Only keys, such as a `{cursor}` move, can follow it: they would not edit the
+        // line that ran, so they are dropped. A newline before more text stays in the line.
         let mut execute = request.immediate == Some(true);
         if let Some(insertion) = &request.insertion {
-            let text = match insertion.find(['\r', '\n']) {
-                Some(newline) => {
+            let text = match insertion.rfind(['\r', '\n']) {
+                Some(newline) if only_keys(&insertion[newline + 1..]) => {
                     execute = true;
-                    &insertion[..newline]
+                    insertion[..newline].trim_end_matches(['\r', '\n'])
                 },
-                None => insertion.as_str(),
+                _ => insertion.as_str(),
             };
             self.type_text(text);
         }
@@ -131,22 +133,7 @@ impl Session {
         while let Some(c) = chars.next() {
             match c {
                 '\x08' | '\x7f' => self.delete_before_cursor(),
-                '\x1b' => match chars.next() {
-                    // CSI: parameter and intermediate bytes, then one final byte
-                    Some('[') => {
-                        let seq = chars.as_str();
-                        let end = seq.find(|c: char| ('\x40'..='\x7e').contains(&c));
-                        let params = &seq[..end.unwrap_or(seq.len())];
-                        if params.is_empty() {
-                            self.arrow_key(seq.chars().next());
-                        }
-                        chars = seq[end.map_or(seq.len(), |end| end + 1)..].chars();
-                    },
-                    // SS3, which a terminal in application cursor mode sends for arrows
-                    Some('O') => self.arrow_key(chars.next()),
-                    // A meta key or a lone ESC runs a zsh widget; neither inserts text
-                    _ => {},
-                },
+                '\x1b' => self.arrow_key(read_escape(&mut chars)),
                 _ => {
                     let at = char_to_byte(&self.buffer, self.cursor);
                     self.buffer.insert(at, c);
@@ -231,6 +218,36 @@ fn whoami_hostname() -> Option<String> {
 
 fn char_to_byte(text: &str, chars: usize) -> usize {
     text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i)
+}
+
+/// Reads the escape sequence after an ESC. Returns its arrow key, if it is one.
+fn read_escape(chars: &mut Chars<'_>) -> Option<char> {
+    match chars.next() {
+        // CSI: parameter and intermediate bytes, then one final byte
+        Some('[') => {
+            let seq = chars.as_str();
+            let end = seq.find(|c: char| ('\x40'..='\x7e').contains(&c));
+            *chars = seq[end.map_or(seq.len(), |end| end + 1)..].chars();
+            if end == Some(0) { seq.chars().next() } else { None }
+        },
+        // SS3, which a terminal in application cursor mode sends for arrows
+        Some('O') => chars.next(),
+        // A meta key or a lone ESC runs a zsh widget; neither inserts text
+        _ => None,
+    }
+}
+
+/// Whether `text` holds only keys (backspaces and escapes), and no text to insert
+fn only_keys(text: &str) -> bool {
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x08' | '\x7f' => {},
+            '\x1b' => _ = read_escape(&mut chars),
+            _ => return false,
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -421,6 +438,18 @@ mod tests {
         let mut s = session("", 0);
         assert!(s.apply_insert(&insert("ls\n\x1b[D")));
         assert_eq!((s.buffer.as_str(), s.cursor), ("ls", 2));
+    }
+
+    #[test]
+    fn insertion_newline_before_text_stays_in_the_line() {
+        // Nothing is dropped: a newline with text after it does not run the line
+        let mut s = session("", 0);
+        assert!(!s.apply_insert(&insert("a\nb")));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("a\nb", 3));
+
+        let mut s = session("", 0);
+        assert!(s.apply_insert(&insert("a\nb\r\n\x1b[D")));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("a\nb", 3));
     }
 
     #[test]
