@@ -582,11 +582,17 @@ impl DoctorCheck for SettingsCorruptionCheck {
     }
 }
 
+/// Whether this shell runs without the PTY. A PTY shell started from a no-PTY zsh inherits
+/// TABTERM_MODE, so TAB_TERM, which only the PTY sets, decides.
+fn no_pty_mode(env: &tab_os_shim::Env) -> bool {
+    env.get_os(TAB_TERM).is_none() && env.get(TABTERM_MODE).as_deref() == Ok("no-pty")
+}
+
 /// zsh runs without the PTY by default, so TAB_TERM is unset. tabterm runs in the background and
 /// the shell reports to it on the link socket. Returns `None` when the PTY check applies, including
 /// a PTY shell that inherited the no-PTY variables from a parent zsh.
 fn no_pty_link_check(env: &tab_os_shim::Env) -> Option<Result<(), DoctorError>> {
-    if env.get_os(TAB_TERM).is_some() || env.get(TABTERM_MODE).as_deref() != Ok("no-pty") {
+    if !no_pty_mode(env) {
         return None;
     }
 
@@ -735,6 +741,72 @@ impl DoctorCheck for InlineCheck {
     }
 }
 
+/// Asks tabterm to type a line into the terminal and checks that doctor reads it back on stdin.
+async fn check_insert_round_trip(mut conn: BufferedUnixStream) -> Result<BufferedUnixStream, DoctorError> {
+    // Try sending an insert event and ensure it inserts what is expected
+    enable_raw_mode().with_context(
+        || "Your terminal doesn't support raw mode, which is required to verify that the {PTY_BINARY_NAME} socket works",
+    )?;
+
+    let test_message = format!("Testing {PTY_BINARY_NAME}...\n");
+    let test_message_ = test_message.clone();
+
+    let write_handle: tokio::task::JoinHandle<Result<BufferedUnixStream, DoctorError>> = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs_f32(0.2)).await;
+
+        let message = tab_proto::figterm::FigtermRequestMessage {
+            request: Some(tab_proto::figterm::figterm_request_message::Request::InsertText(
+                tab_proto::figterm::InsertTextRequest {
+                    insertion: Some(test_message_),
+                    deletion: None,
+                    offset: None,
+                    immediate: Some(true),
+                    insertion_buffer: None,
+                    insert_during_command: Some(true),
+                },
+            )),
+        };
+
+        conn.send_message(message).await.map_err(|err| doctor_error!("{err}"))?;
+
+        Ok(conn)
+    });
+
+    let mut buffer = String::new();
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+
+    let timeout = tokio::time::timeout(Duration::from_secs_f32(1.2), stdin.read_line(&mut buffer));
+
+    let timeout_result: Result<(), DoctorError> = match timeout.await {
+        Ok(Ok(_)) => {
+            if buffer.trim() == test_message.trim() {
+                Ok(())
+            } else {
+                Err(DoctorError::Warning(
+                    format!(
+                        "{PTY_BINARY_NAME} socket did not read buffer correctly, don't press any keys while the checks are running: {buffer:?}"
+                    )
+                    .into(),
+                ))
+            }
+        },
+        Ok(Err(err)) => Err(doctor_error!("{PTY_BINARY_NAME} socket err: {}", err)),
+        Err(_) => Err(doctor_error!("{PTY_BINARY_NAME} socket write timed out after 1s")),
+    };
+
+    disable_raw_mode().context("Failed to disable raw mode")?;
+
+    let conn = match write_handle.await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(err)) => return Err(doctor_error!("Failed to write to {PTY_BINARY_NAME} socket: {err}")),
+        Err(err) => return Err(doctor_error!("Failed to write to {PTY_BINARY_NAME} socket: {err}")),
+    };
+
+    timeout_result?;
+
+    Ok(conn)
+}
+
 struct PtySocketCheck;
 
 #[async_trait]
@@ -776,71 +848,18 @@ impl DoctorCheck for PtySocketCheck {
         }
 
         // Connect to the socket
-        let mut conn = match BufferedUnixStream::connect_timeout(&socket_path, Duration::from_secs(2)).await {
+        let conn = match BufferedUnixStream::connect_timeout(&socket_path, Duration::from_secs(2)).await {
             Ok(connection) => connection,
             Err(err) => return Err(doctor_error!("Socket exists but could not connect: {err}")),
         };
 
-        // Try sending an insert event and ensure it inserts what is expected
-        enable_raw_mode().with_context(
-            || "Your terminal doesn't support raw mode, which is required to verify that the {PTY_BINARY_NAME} socket works",
-        )?;
-
-        let test_message = format!("Testing {PTY_BINARY_NAME}...\n");
-        let test_message_ = test_message.clone();
-
-        let write_handle: tokio::task::JoinHandle<Result<BufferedUnixStream, DoctorError>> = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs_f32(0.2)).await;
-
-            let message = tab_proto::figterm::FigtermRequestMessage {
-                request: Some(tab_proto::figterm::figterm_request_message::Request::InsertText(
-                    tab_proto::figterm::InsertTextRequest {
-                        insertion: Some(test_message_),
-                        deletion: None,
-                        offset: None,
-                        immediate: Some(true),
-                        insertion_buffer: None,
-                        insert_during_command: Some(true),
-                    },
-                )),
-            };
-
-            conn.send_message(message).await.map_err(|err| doctor_error!("{err}"))?;
-
-            Ok(conn)
-        });
-
-        let mut buffer = String::new();
-        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
-
-        let timeout = tokio::time::timeout(Duration::from_secs_f32(1.2), stdin.read_line(&mut buffer));
-
-        let timeout_result: Result<(), DoctorError> = match timeout.await {
-            Ok(Ok(_)) => {
-                if buffer.trim() == test_message.trim() {
-                    Ok(())
-                } else {
-                    Err(DoctorError::Warning(
-                        format!(
-                            "{PTY_BINARY_NAME} socket did not read buffer correctly, don't press any keys while the checks are running: {buffer:?}"
-                        )
-                        .into(),
-                    ))
-                }
-            },
-            Ok(Err(err)) => Err(doctor_error!("{PTY_BINARY_NAME} socket err: {}", err)),
-            Err(_) => Err(doctor_error!("{PTY_BINARY_NAME} socket write timed out after 1s")),
+        // In no-PTY mode tabterm does not own the terminal, so it cannot type into doctor's stdin.
+        // The diagnostics request below still checks that tabterm answers on the socket.
+        let mut conn = if no_pty_mode(&tab_os_shim::Env::new()) {
+            conn
+        } else {
+            check_insert_round_trip(conn).await?
         };
-
-        disable_raw_mode().context("Failed to disable raw mode")?;
-
-        let mut conn = match write_handle.await {
-            Ok(Ok(conn)) => conn,
-            Ok(Err(err)) => return Err(doctor_error!("Failed to write to {PTY_BINARY_NAME} socket: {err}")),
-            Err(err) => return Err(doctor_error!("Failed to write to {PTY_BINARY_NAME} socket: {err}")),
-        };
-
-        timeout_result?;
 
         // Figterm diagnostics
 
@@ -2156,6 +2175,15 @@ mod tests {
             (TABTERM_LINK_SOCKET, socket.to_str().unwrap()),
         ]);
         assert!(matches!(result, Some(Err(_))), "{result:?}");
+    }
+
+    #[test]
+    fn no_pty_mode_needs_tabterm_mode_without_tab_term() {
+        let mode = |vars: &[(&str, &str)]| no_pty_mode(&tab_os_shim::Env::from_slice(vars));
+        assert!(mode(&[(TABTERM_MODE, "no-pty")]));
+        assert!(!mode(&[]));
+        // A PTY shell started from a no-PTY zsh inherits TABTERM_MODE.
+        assert!(!mode(&[(TAB_TERM, "1.0.0"), (TABTERM_MODE, "no-pty")]));
     }
 
     #[test]
