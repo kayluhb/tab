@@ -7,6 +7,7 @@ pub mod interceptor;
 pub mod ipc;
 pub mod logger;
 mod message;
+mod no_pty;
 pub mod pty;
 pub mod term;
 
@@ -934,6 +935,22 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
 fn main() {
     let cli = Cli::parse();
     let command = cli.command.as_deref();
+
+    if let (true, Some(shell_pid)) = (cli.no_pty, cli.shell_pid) {
+        // stdout carries the session id to the shell, so nothing else may print to it.
+        // The shell falls back to PTY mode when this fails, which handles `qterm.enabled`.
+        // The shell reads the exit code to decide whether to fall back
+        if !state::get_bool_or("qterm.enabled", true) {
+            #[allow(clippy::exit)]
+            std::process::exit(1);
+        }
+        if let Err(err) = no_pty::start(shell_pid) {
+            eprintln!("{PTY_BINARY_NAME} --no-pty failed: {err:?}");
+            #[allow(clippy::exit)]
+            std::process::exit(1);
+        }
+        return;
+    }
 
     logger::stdio_debug_log(format!("{TAB_LOG_LEVEL}={}", tab_log::get_log_level()));
 

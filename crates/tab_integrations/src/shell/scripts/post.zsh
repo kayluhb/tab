@@ -78,6 +78,7 @@ fig_precmd() {
   local LAST_STATUS=$?
 
   fig_reset_hooks
+  _tab_link_prompt "$LAST_STATUS"
 
   fig_osc "OSCUnlock=%s" "${TABTERM_SESSION_ID}"
   fig_osc "Dir=%s" "$PWD"

@@ -338,6 +338,11 @@ pub fn figterm_socket_path(session_id: impl Display) -> Result<PathBuf> {
     Ok(sockets_dir()?.join("t").join(format!("{session_id}.sock")))
 }
 
+/// The socket a shell talks to tabterm on in no-PTY mode
+pub fn shell_link_socket_path(session_id: impl Display) -> Result<PathBuf> {
+    Ok(sockets_dir()?.join("s").join(format!("{session_id}.sock")))
+}
+
 /// The path to the resources directory
 ///
 /// - MacOS: "/Applications/{app_name}.app/Contents/Resources"
