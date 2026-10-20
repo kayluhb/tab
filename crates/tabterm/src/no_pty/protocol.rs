@@ -57,6 +57,9 @@ pub enum LinkMessage {
     },
     /// The popup's top suggestion: ghost text to show after `buffer`
     Ghost { buffer: String, suffix: String },
+    /// The keys the popup may take, by name: the shell binds these and gives every
+    /// other key back its own widget
+    Bind { keys: Vec<String> },
     /// Answer to [`ShellMessage::Prompt`] when there is nothing to start the line with
     Nothing,
 }
@@ -165,6 +168,15 @@ impl LinkMessage {
             },
             LinkMessage::Ghost { buffer, suffix } => {
                 format!("ghost\t{}\t{}\n", escape(buffer), escape(suffix))
+            },
+            LinkMessage::Bind { keys } => {
+                let mut line = String::from("bind");
+                for key in keys {
+                    line.push('\t');
+                    line.push_str(&escape(key));
+                }
+                line.push('\n');
+                line
             },
         }
     }
@@ -325,5 +337,13 @@ mod tests {
             .to_line(),
             "ghost\tgit ch\teckout\\t\n"
         );
+        assert_eq!(
+            LinkMessage::Bind {
+                keys: vec!["enter".into(), "shift+tab".into()]
+            }
+            .to_line(),
+            "bind\tenter\tshift+tab\n"
+        );
+        assert_eq!(LinkMessage::Bind { keys: vec![] }.to_line(), "bind\n");
     }
 }

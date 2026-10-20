@@ -11,7 +11,11 @@ if [[ -n "${ZSH_NAME:-}" ]]; then
 typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
 # Counts buffer reports; tabterm tags each insert with the one it was computed from
 typeset -gi _tab_link_seq=0
-typeset -gA _tab_link_fallback _tab_link_key_name
+# _tab_link_key_name: key sequence -> the name tabterm knows the key by.
+# _tab_link_fallback: keymap:sequence -> the widget the key had before tabterm
+# bound it ('' where that keymap is the same as main). _tab_link_bound: the
+# names bound now.
+typeset -gA _tab_link_fallback _tab_link_key_name _tab_link_bound
 
 _tab_link_active() {
   [[ "${TABTERM_MODE:-}" == no-pty && -n "${TABTERM_LINK_SOCKET:-}" ]]
@@ -188,14 +192,11 @@ _tab_link_key() {
   fi
   case "$reply" in
     $'key\t1\t1')
-      # Apply the insert here: only a widget can run the line. Ghost text may
-      # arrive before it on the same connection.
+      # Apply the insert here: only a widget can run the line. Ghost text or
+      # keys to bind may arrive before it on the same connection.
       local line
       while [[ -n "$_tab_link_push_fd" ]] && IFS= read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; do
-        if [[ "$line" == ghost$'\t'* ]]; then
-          _tab_link_set_ghost "$line"
-          continue
-        fi
+        _tab_link_handle_push "$line" && continue
         _tab_link_apply "$line" && zle accept-line
         break
       done
@@ -266,51 +267,115 @@ _tab_link_refresh_ghost() {
   (( ${#BUFFER} && ! ${+_TAB_AUTOSUGGEST_DISABLED} )) && zle autosuggest-fetch
 }
 
-# Handles a line tabterm pushes while zsh is idle: a buffer or ghost text. zle
-# does not finish a line from a -F handler, so a pushed `execute` waits for the
-# next key.
+# Handles a pushed line other than a buffer: ghost text or keys to bind. Fails
+# for a buffer.
+_tab_link_handle_push() {
+  case "$1" in
+    ghost$'\t'*) _tab_link_set_ghost "$1" ;;
+    bind|bind$'\t'*) _tab_link_bind "${(@)${(@ps:\t:)1}[2,-1]}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Handles a line tabterm pushes while zsh is idle. zle does not finish a line
+# from a -F handler, so a pushed `execute` waits for the next key.
 _tab_link_on_push() {
   local line
   if ! IFS= read -r -u "$1" line 2>/dev/null; then
     _tab_link_disconnect
     return
   fi
-  if [[ "$line" == ghost$'\t'* ]]; then
-    _tab_link_set_ghost "$line"
-  else
+  if ! _tab_link_handle_push "$line"; then
     _tab_link_apply "$line"
     _tab_link_refresh_ghost
   fi
   zle -R
 }
 
-_tab_link_bind_keys() {
-  local -A names=(
+# Names the key sequences tabterm knows, as tabterm's no_pty/session.rs
+# names them
+_tab_link_init_keys() {
+  local -i code
+  local letter
+  # control+letter first, so the named keys win where they share a byte (^I, ^M)
+  for code in {1..26}; do
+    (( letter = code + 96 ))
+    letter=${(#)letter}
+    _tab_link_key_name[${(#)code}]=control+$letter
+    _tab_link_key_name[$'\e'$letter]=option+$letter
+  done
+  _tab_link_key_name+=(
     $'\t' tab
+    $'\e[Z' shift+tab
     $'\r' enter
     $'\e' esc
     $'\e[A' up
     $'\eOA' up
     $'\e[B' down
     $'\eOB' down
-    $'\e[Z' shift+tab
-    $'\C-p' control+p
-    $'\C-n' control+n
-    $'\C-k' control+k
-    $'\C-r' control+r
+    $'\e[C' right
+    $'\eOC' right
+    $'\e[D' left
+    $'\eOD' left
+    $'\e[H' home
+    $'\eOH' home
+    $'\e[F' end
+    $'\eOF' end
+    $'\e[5~' pageup
+    $'\e[6~' pagedown
+    $'\x7f' backspace
+    $'\e[3~' delete
   )
-  local keymap seq binding
-  for keymap in main emacs viins; do
-    for seq in "${(@k)names}"; do
-      binding=${${(z)$(bindkey -M "$keymap" -- "$seq" 2>/dev/null)}[2]}
-      [[ "$binding" == tab-link-key ]] && continue
-      _tab_link_fallback[$keymap:$seq]=$binding
-      bindkey -M "$keymap" -- "$seq" tab-link-key
-    done
-  done
-  _tab_link_key_name=("${(@kv)names}")
+}
 
-  # Focus reports, bound in every keymap so they never insert text
+# Binds the keys a `bind` line names, so pressing one asks tabterm, and gives
+# every other key back the widget it had. Runs from the push handler, where a
+# changed binding applies from the next key. Looks up each key's own widget only
+# the first time, as that costs a process.
+_tab_link_bind() {
+  local -A want
+  local name seq keymap binding
+  for name in "$@"; do
+    want[$name]=1
+  done
+
+  for name in "${(@k)_tab_link_bound}"; do
+    (( ${+want[$name]} )) && continue
+    for seq in "${(@k)_tab_link_key_name[(R)$name]}"; do
+      for keymap in main emacs viins; do
+        binding=${_tab_link_fallback[$keymap:$seq]}
+        if [[ -z "$binding" ]]; then
+          continue
+        elif [[ "$binding" == undefined-key ]]; then
+          bindkey -M "$keymap" -r -- "$seq"
+        else
+          bindkey -M "$keymap" -- "$seq" "$binding"
+        fi
+      done
+    done
+    unset "_tab_link_bound[$name]"
+  done
+
+  for name in "${(@k)want}"; do
+    (( ${+_tab_link_bound[$name]} )) && continue
+    for seq in "${(@k)_tab_link_key_name[(R)$name]}"; do
+      for keymap in main emacs viins; do
+        if (( ! ${+_tab_link_fallback[$keymap:$seq]} )); then
+          binding=${${(z)$(bindkey -M "$keymap" -- "$seq" 2>/dev/null)}[2]}
+          # Already ours: this keymap is main, which was just bound
+          [[ "$binding" == tab-link-key ]] && binding=""
+          _tab_link_fallback[$keymap:$seq]=$binding
+        fi
+        [[ -n "${_tab_link_fallback[$keymap:$seq]}" ]] && bindkey -M "$keymap" -- "$seq" tab-link-key
+      done
+    done
+    _tab_link_bound[$name]=1
+  done
+}
+
+# Focus reports, bound in every keymap so they never insert text
+_tab_link_bind_focus() {
+  local keymap
   for keymap in main emacs viins vicmd; do
     bindkey -M "$keymap" -- $'\e[O' _tab_link_focus_out
     bindkey -M "$keymap" -- $'\e[I' _tab_link_focus_in
@@ -331,7 +396,9 @@ if _tab_link_active; then
   # Its own hook: fig_preexec does nothing in no-PTY mode
   preexec_functions+=(_tab_link_preexec)
   zshexit_functions+=(_tab_link_focus_off)
-  _tab_link_bind_keys
+  # The popup's keys are bound when tabterm sends them, once connected
+  _tab_link_init_keys
+  _tab_link_bind_focus
 fi
 
 fi

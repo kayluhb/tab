@@ -222,7 +222,10 @@ async fn main_loop(session_id: String, shell_pid: i32, listener: StdUnixListener
             event = shell_rx.recv() => {
                 let Some(event) = event else { return Ok(()) };
                 match event {
-                    ShellEvent::PushConnected(tx) => push_tx = Some(tx),
+                    ShellEvent::PushConnected(tx) => {
+                        session.forget_bound_keys();
+                        push_tx = Some(tx);
+                    },
                     ShellEvent::Message(message, reply) => {
                         let link = handle_shell_message(&mut session, message, &remote_tx, &history_sender, autocomplete, &mut first_prompt);
                         if let (Some(reply), Some(link)) = (reply, link.reply) {
@@ -256,6 +259,17 @@ async fn main_loop(session_id: String, shell_pid: i32, listener: StdUnixListener
                     session.interceptor.reset();
                 }
             },
+        }
+
+        // Tell the shell which keys to bind whenever that changes: after the popup's
+        // keybindings load, and as Esc comes and goes with the popup
+        if let Some(tx) = &push_tx {
+            if let Some(keys) = session.take_bind_update() {
+                tx.send(LinkMessage::Bind {
+                    keys: keys.into_iter().collect(),
+                })
+                .ok();
+            }
         }
     }
 }
