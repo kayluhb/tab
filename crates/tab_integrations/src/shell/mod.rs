@@ -809,16 +809,15 @@ mod test {
         }
     }
 
-    /// A login zsh sources pre.sh from both .zprofile and .zshrc. The second source must reuse the
-    /// no-PTY tabterm the first one started.
+    /// Runs `script` in `zsh -i` with stub binaries and returns the arguments of each tabterm
+    /// launch, or `None` if zsh is not installed. `$1` in `script` is the rendered pre.sh.
     #[cfg(unix)]
-    #[test]
-    fn zsh_pre_starts_one_no_pty_tabterm_when_sourced_twice() {
+    fn zsh_pre_tabterm_launches(script: &str, env: &[(&str, &str)]) -> Option<Vec<String>> {
         use std::os::unix::fs::PermissionsExt;
 
         if Command::new("zsh").arg("--version").output().is_err() {
             eprintln!("zsh not found, skipping");
-            return;
+            return None;
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -835,7 +834,7 @@ mod test {
         write_exe(
             PTY_BINARY_NAME,
             &format!(
-                "echo launch >> '{}'\nprintf 'session\\n/tmp/link.sock\\n'",
+                "echo \"$*\" >> '{}'\nprintf 'session\\n/tmp/link.sock\\n'",
                 launches.display()
             ),
         );
@@ -846,11 +845,12 @@ mod test {
         // pre.sh only starts tabterm when stdout is a terminal.
         let pty = nix::pty::openpty(None, None).unwrap();
         let status = Command::new("zsh")
-            .args(["-f", "-i", "-c", r#"source "$1"; source "$1""#, "zsh"])
+            .args(["-f", "-i", "-c", script, "zsh"])
             .arg(&pre)
             .env_clear()
             .env("HOME", dir.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(std::fs::File::from(pty.slave))
             .status()
@@ -858,7 +858,37 @@ mod test {
         assert!(status.success());
 
         let launches = std::fs::read_to_string(&launches).unwrap_or_default();
-        assert_eq!(launches.lines().count(), 1, "tabterm launches:\n{launches}");
+        Some(launches.lines().map(str::to_owned).collect())
+    }
+
+    /// A login zsh sources pre.sh from both .zprofile and .zshrc. The second source must reuse the
+    /// no-PTY tabterm the first one started.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_pre_starts_one_no_pty_tabterm_when_sourced_twice() {
+        let Some(launches) = zsh_pre_tabterm_launches(r#"source "$1"; source "$1""#, &[]) else {
+            return;
+        };
+        assert_eq!(launches.len(), 1, "tabterm launches: {launches:?}");
+        assert!(
+            launches[0].starts_with("--no-pty --shell-pid "),
+            "tabterm launches: {launches:?}"
+        );
+    }
+
+    /// A child shell that inherits TAB_LINK_STARTED (for example with allexport) must still start
+    /// its own tabterm.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_pre_starts_no_pty_tabterm_with_inherited_link_started() {
+        let Some(launches) = zsh_pre_tabterm_launches(r#"source "$1""#, &[("TAB_LINK_STARTED", "1")]) else {
+            return;
+        };
+        assert_eq!(launches.len(), 1, "tabterm launches: {launches:?}");
+        assert!(
+            launches[0].starts_with("--no-pty --shell-pid "),
+            "tabterm launches: {launches:?}"
+        );
     }
 
     #[test]
