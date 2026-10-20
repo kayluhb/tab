@@ -263,13 +263,13 @@ async fn main_loop(session_id: String, shell_pid: i32, listener: StdUnixListener
 
         // Tell the shell which keys to bind whenever that changes: after the popup's
         // keybindings load, and as Esc comes and goes with the popup
-        if let Some(tx) = &push_tx {
-            if let Some(keys) = session.take_bind_update() {
-                tx.send(LinkMessage::Bind {
-                    keys: keys.into_iter().collect(),
-                })
-                .ok();
-            }
+        if let Some(tx) = &push_tx
+            && let Some(keys) = session.take_bind_update()
+        {
+            tx.send(LinkMessage::Bind {
+                keys: keys.into_iter().collect(),
+            })
+            .ok();
         }
     }
 }
@@ -460,14 +460,11 @@ fn handle_request(session: &mut Session, request: FigtermRequest) -> (Option<Lin
             }
             (None, None)
         },
-        FigtermRequest::SetInlineSuggestion(request) => {
+        FigtermRequest::SetInlineSuggestion(figterm::SetInlineSuggestionRequest { buffer, suffix }) => {
             // Pushed so the shell's ghost text needs no process per keystroke. The cache
             // still serves `inline-suggestion` callers on the tabterm socket.
-            INLINE_SUGGESTION.set(request.buffer.clone(), request.suffix.clone());
-            let push = LinkMessage::Ghost {
-                buffer: request.buffer,
-                suffix: request.suffix,
-            };
+            INLINE_SUGGESTION.set(buffer.clone(), suffix.clone());
+            let push = LinkMessage::Ghost { buffer, suffix };
             (Some(push), None)
         },
         FigtermRequest::InsertOnNewCmd(command) => {
@@ -731,8 +728,70 @@ mod tests {
                 execute: false,
             })
         );
-        // The shell reports the result at the next seq
-        assert_eq!(s.seq, 5);
+    }
+
+    fn shell_message(session: &mut Session, message: ShellMessage) -> LinkOutput {
+        let (remote_tx, _remote_rx) = flume::unbounded();
+        let (history_tx, _history_rx) = flume::unbounded();
+        handle_shell_message(session, message, &remote_tx, &history_tx, false, &mut false)
+    }
+
+    #[test]
+    fn insert_is_tagged_with_the_seq_the_shell_reported() {
+        let mut s = session("", 0);
+        shell_message(&mut s, ShellMessage::Buffer {
+            seq: 9,
+            cursor: 2,
+            text: "ls".into(),
+        });
+        assert_eq!(s.seq, 9);
+        let (push, _) = handle_request(
+            &mut s,
+            FigtermRequest::InsertText(InsertTextRequest {
+                insertion: Some(" -la".into()),
+                ..Default::default()
+            }),
+        );
+        assert!(
+            matches!(push, Some(LinkMessage::SetBuffer { seq: Some(9), .. })),
+            "{push:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_the_env_and_aliases_the_shell_sends() {
+        // The only test that writes these statics
+        let mut s = session("", 0);
+        shell_message(&mut s, ShellMessage::Env(vec![("A".into(), "1".into())]));
+        assert_eq!(*SHELL_ENVIRONMENT_VARIABLES.lock().unwrap(), [EnvironmentVariable {
+            key: "A".into(),
+            value: Some("1".into()),
+        }]);
+        shell_message(&mut s, ShellMessage::Env(vec![]));
+        assert!(SHELL_ENVIRONMENT_VARIABLES.lock().unwrap().is_empty());
+
+        shell_message(&mut s, ShellMessage::Alias("ll='ls -l'".into()));
+        assert_eq!(SHELL_ALIAS.lock().unwrap().as_deref(), Some("ll='ls -l'"));
+    }
+
+    #[tokio::test]
+    async fn peer_pid_is_this_process_for_a_local_pair() {
+        let (stream, _other) = UnixStream::pair().unwrap();
+        assert_eq!(peer_pid(&stream).unwrap(), Some(std::process::id() as i32));
+    }
+
+    #[tokio::test]
+    async fn hello_takes_the_pid_from_the_kernel() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (shell_tx, mut shell_rx) = mpsc::unbounded_channel();
+        tokio::spawn(serve_shell(server, shell_tx));
+        client.write_all(b"hello\t1\t\t\n").await.unwrap();
+        match shell_rx.recv().await {
+            Some(ShellEvent::Message(ShellMessage::Hello { pid, .. }, None)) => {
+                assert_eq!(pid, std::process::id() as i32);
+            },
+            _ => panic!("expected hello"),
+        }
     }
 
     #[test]
@@ -766,11 +825,19 @@ mod tests {
             Some("buffer\t1\t2\tls")
         );
         assert_eq!(
-            read_line(&mut reader, &mut buf).await.unwrap().unwrap().len(),
-            MAX_LINE_BYTES
+            read_line(&mut reader, &mut buf).await.unwrap(),
+            Some("a".repeat(MAX_LINE_BYTES))
         );
         assert_eq!(read_line(&mut reader, &mut buf).await.unwrap().as_deref(), Some("last"));
         assert_eq!(read_line(&mut reader, &mut buf).await.unwrap(), None);
+
+        // A full-length last line needs no newline
+        input = "a".repeat(MAX_LINE_BYTES).into_bytes();
+        let mut reader = BufReader::new(input.as_slice());
+        assert_eq!(
+            read_line(&mut reader, &mut buf).await.unwrap(),
+            Some("a".repeat(MAX_LINE_BYTES))
+        );
 
         input = "a".repeat(MAX_LINE_BYTES + 1).into_bytes();
         let mut reader = BufReader::new(input.as_slice());
