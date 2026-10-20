@@ -217,9 +217,11 @@ if [[ -n "${ZSH_NAME:-}" ]]; then
 # crates/tabterm/src/no_pty/protocol.rs. Lines with text are read with `IFS=`,
 # or read would strip spaces at the ends of the text.
 
-typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
+# Kept if this file is sourced again (e.g. `source ~/.zshrc`), so the shell
+# keeps its connection instead of opening a second one
+typeset -g _tab_link_fd=${_tab_link_fd-} _tab_link_push_fd=${_tab_link_push_fd-} _tab_link_sent=${_tab_link_sent-}
 # Counts buffer reports; tabterm tags each insert with the one it was computed from
-typeset -gi _tab_link_seq=0
+typeset -gi _tab_link_seq=${_tab_link_seq-0}
 # _tab_link_key_name: key sequence -> the name tabterm knows the key by.
 # _tab_link_fallback: keymap:sequence -> the widget the key had before tabterm
 # bound it ('' where that keymap is the same as main). _tab_link_bound: the
@@ -295,7 +297,7 @@ _tab_link_send() {
 # precmd cannot edit the line, so zle-line-init applies it.
 typeset -g _tab_link_start_text="" _tab_link_start_run=""
 
-typeset -g _tab_link_env_sent="" _tab_link_alias_sent=""
+typeset -g _tab_link_env_sent=${_tab_link_env_sent-} _tab_link_alias_sent=${_tab_link_alias_sent-}
 
 # Sends the exported environment and the aliases, each only when it changed
 # since it was last sent. Built in the shell, with no process or subshell.
@@ -350,7 +352,7 @@ _tab_link_line_init() {
   [[ "$_tab_link_start_run" == 1 ]] && zle accept-line
 }
 
-typeset -g _tab_link_focus_on=""
+typeset -g _tab_link_focus_on=${_tab_link_focus_on-}
 
 # Stops focus reporting, so commands never see the focus sequences
 _tab_link_focus_off() {
@@ -603,8 +605,8 @@ if _tab_link_active; then
   add-zle-hook-widget line-pre-redraw _tab_link_report
   add-zle-hook-widget line-init _tab_link_line_init
   # Its own hook: fig_preexec does nothing in no-PTY mode
-  preexec_functions+=(_tab_link_preexec)
-  zshexit_functions+=(_tab_link_focus_off)
+  preexec_functions=("${(@)preexec_functions:#_tab_link_preexec}" _tab_link_preexec)
+  zshexit_functions=("${(@)zshexit_functions:#_tab_link_focus_off}" _tab_link_focus_off)
   # The popup's keys are bound when tabterm sends them, once connected
   _tab_link_init_keys
   _tab_link_bind_focus
