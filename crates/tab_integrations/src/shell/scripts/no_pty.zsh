@@ -41,7 +41,7 @@ _tab_link_connect() {
   if zsocket "$TABTERM_LINK_SOCKET" 2>/dev/null; then
     _tab_link_push_fd=$REPLY
     print -r -u "$_tab_link_push_fd" -- push
-    zle -F -w "$_tab_link_push_fd" _tab_link_on_push 2>/dev/null
+    zle -F -w "$_tab_link_push_fd" tab-link-on-push 2>/dev/null
   fi
 
   _tab_link_escape "${TTY:-}"
@@ -68,6 +68,10 @@ _tab_link_prompt() {
   _tab_link_escape "$PWD"
   _tab_link_send "prompt"$'\t'"$1"$'\t'"$REPLY" || return
   _tab_link_sent=""
+  # Ask the terminal to report focus changes while at the prompt, so switching
+  # tabs or windows can hide the popup
+  print -n $'\e[?1004h'
+  _tab_link_focus_on=1
   local reply
   read -r -u "$_tab_link_fd" -t 0.2 reply 2>/dev/null || return
   _tab_link_parse_set "$reply" || return
@@ -82,7 +86,27 @@ _tab_link_line_init() {
   [[ "$_tab_link_start_run" == 1 ]] && zle accept-line
 }
 
+typeset -g _tab_link_focus_on=""
+
+# Stops focus reporting, so commands never see the focus sequences
+_tab_link_focus_off() {
+  [[ -n "$_tab_link_focus_on" ]] || return
+  print -n $'\e[?1004l'
+  _tab_link_focus_on=""
+}
+
+# Hides the popup. The line stays reported as is, so the redraw after this
+# widget does not show it again; the next edit does.
+_tab_link_focus_out() {
+  _tab_link_send "focus"$'\t'"0"
+}
+
+_tab_link_focus_in() {
+  _tab_link_send "focus"$'\t'"1"
+}
+
 _tab_link_preexec() {
+  _tab_link_focus_off
   [[ -n "$_tab_link_fd" ]] || return
   _tab_link_escape "$1"
   _tab_link_send "preexec"$'\t'"$REPLY"
@@ -178,22 +202,33 @@ _tab_link_bind_keys() {
   for keymap in main emacs viins; do
     for seq in "${(@k)names}"; do
       binding=${${(z)$(bindkey -M "$keymap" -- "$seq" 2>/dev/null)}[2]}
-      [[ "$binding" == _tab_link_key ]] && continue
+      [[ "$binding" == tab-link-key ]] && continue
       _tab_link_fallback[$keymap:$seq]=$binding
-      bindkey -M "$keymap" -- "$seq" _tab_link_key
+      bindkey -M "$keymap" -- "$seq" tab-link-key
     done
   done
   _tab_link_key_name=("${(@kv)names}")
+
+  # Focus reports, bound in every keymap so they never insert text
+  for keymap in main emacs viins vicmd; do
+    bindkey -M "$keymap" -- $'\e[O' _tab_link_focus_out
+    bindkey -M "$keymap" -- $'\e[I' _tab_link_focus_in
+  done
 }
 
 if _tab_link_active; then
-  zle -N _tab_link_key
-  zle -N _tab_link_on_push
+  # Widget names without a leading underscore, so the inline suggestions plugin
+  # wraps them and refreshes its ghost text when they change the line
+  zle -N tab-link-key _tab_link_key
+  zle -N tab-link-on-push _tab_link_on_push
+  zle -N _tab_link_focus_out
+  zle -N _tab_link_focus_in
   autoload -Uz add-zle-hook-widget
   add-zle-hook-widget line-pre-redraw _tab_link_report
   add-zle-hook-widget line-init _tab_link_line_init
   # Its own hook, not fig_preexec: fig_precmd also calls that after ^C, with no command
   preexec_functions+=(_tab_link_preexec)
+  zshexit_functions+=(_tab_link_focus_off)
   _tab_link_bind_keys
 fi
 

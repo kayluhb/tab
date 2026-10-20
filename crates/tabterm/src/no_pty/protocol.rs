@@ -30,6 +30,8 @@ pub enum ShellMessage {
     Buffer { cursor: usize, text: String },
     /// A bound key was pressed; tabterm answers with [`LinkMessage::Key`]
     Key { name: String },
+    /// The terminal tab or window gained or lost focus, from focus reporting (`CSI ? 1004 h`)
+    Focus { focused: bool },
 }
 
 /// A message to the shell
@@ -107,6 +109,13 @@ impl ShellMessage {
             },
             "key" => ShellMessage::Key {
                 name: next("name")?.to_owned(),
+            },
+            "focus" => ShellMessage::Focus {
+                focused: match next("focused")? {
+                    "1" => true,
+                    "0" => false,
+                    other => bail!("focus: bad value {other:?}"),
+                },
             },
             other => bail!("unknown message {other:?}"),
         })
@@ -195,11 +204,25 @@ mod tests {
         assert_eq!(ShellMessage::parse("key\tshift+tab").unwrap(), ShellMessage::Key {
             name: "shift+tab".into()
         });
+        assert_eq!(ShellMessage::parse("focus\t0").unwrap(), ShellMessage::Focus {
+            focused: false
+        });
+        assert_eq!(ShellMessage::parse("focus\t1").unwrap(), ShellMessage::Focus {
+            focused: true
+        });
     }
 
     #[test]
     fn rejects_bad_shell_messages() {
-        for line in ["", "nope", "buffer\tx\ttext", "buffer\t3", "hello\tpid\t\t"] {
+        for line in [
+            "",
+            "nope",
+            "buffer\tx\ttext",
+            "buffer\t3",
+            "hello\tpid\t\t",
+            "focus\t2",
+            "focus",
+        ] {
             assert!(ShellMessage::parse(line).is_err(), "{line:?}");
         }
     }

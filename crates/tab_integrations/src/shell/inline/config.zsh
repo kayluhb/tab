@@ -85,6 +85,5 @@ typeset -g TAB_AUTOSUGGEST_ORIGINAL_WIDGET_PREFIX=autosuggest-orig-
 		yank
 		yank-pop
 		zle-\*
-		_tab_link_\*
 	)
 }

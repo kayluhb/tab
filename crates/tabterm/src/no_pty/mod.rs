@@ -299,6 +299,10 @@ fn handle_shell_message(
                 }
             }
             send(new_prompt_hook(session.context()));
+            // PTY mode reads the fresh prompt off the screen; here an empty buffer hides the popup
+            if autocomplete {
+                send(new_edit_buffer_hook(session.context(), String::new(), 0, 0, None));
+            }
 
             // Text queued for the next prompt, then the text the shell was started with
             let mut queued = INSERT_ON_NEW_CMD
@@ -341,6 +345,15 @@ fn handle_shell_message(
                     0,
                     None,
                 ));
+            }
+        },
+        ShellMessage::Focus { focused } => {
+            // Switching tabs or windows hides the popup; the next key shows it again
+            if !focused {
+                session.interceptor.reset();
+                if autocomplete {
+                    send(new_edit_buffer_hook(session.context(), String::new(), 0, 0, None));
+                }
             }
         },
         ShellMessage::Key { name } => {

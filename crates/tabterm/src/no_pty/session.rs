@@ -138,9 +138,17 @@ impl Session {
         self.set_buffer(String::new(), 0);
     }
 
-    /// Marks the prompt as shown and returns the finished command, if any, for history
+    /// Forgets the line and stops taking the popup's keys, e.g. when the popup should hide
+    pub fn clear_line(&mut self) {
+        self.set_buffer(String::new(), 0);
+        self.interceptor.reset();
+    }
+
+    /// Marks the prompt as shown and returns the finished command, if any, for history.
+    /// A new prompt starts an empty line, even after ^C, which runs no command.
     pub fn prompt(&mut self, exit_code: Option<i32>, cwd: PathBuf) -> Option<CommandInfo> {
         self.preexec = false;
+        self.clear_line();
         let finished = self.running.take().map(|(command, start_time)| CommandInfo {
             command: Some(command),
             shell: self.shell_name(),
@@ -320,6 +328,26 @@ mod tests {
         ] {
             assert!(!action_inserts(action), "{action}");
         }
+    }
+
+    #[test]
+    fn prompt_clears_the_line_and_releases_keys() {
+        // ^C at the prompt: the line is gone but no command ran
+        let mut s = session("git ch", 6);
+        s.interceptor.set_actions(
+            &[Action {
+                identifier: "insertSelected".into(),
+                bindings: vec!["enter".into()],
+            }],
+            true,
+        );
+        s.interceptor.set_intercept(true);
+        s.interceptor.set_window_visible(true);
+        assert!(s.intercept("enter").is_some());
+
+        assert!(s.prompt(None, "/".into()).is_none());
+        assert_eq!((s.buffer.as_str(), s.cursor), ("", 0));
+        assert_eq!(s.intercept("enter"), None);
     }
 
     #[test]
