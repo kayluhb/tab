@@ -29,6 +29,10 @@ pub enum ShellMessage {
     /// The edit buffer changed; `seq` counts changes, so tabterm can tag its edits
     /// with the buffer they were computed from
     Buffer { seq: u64, cursor: usize, text: String },
+    /// The exported environment, as key/value pairs. Sent when it changes.
+    Env(Vec<(String, String)>),
+    /// The shell's aliases, in the format `alias` prints them. Sent when they change.
+    Alias(String),
     /// A bound key was pressed; tabterm answers with [`LinkMessage::Key`]
     Key { name: String },
     /// The terminal tab or window gained or lost focus, from focus reporting (`CSI ? 1004 h`)
@@ -117,6 +121,15 @@ impl ShellMessage {
                 cursor: next("cursor")?.parse()?,
                 text: unescape(next("text")?),
             },
+            "env" => {
+                let mut pairs = Vec::new();
+                while let Some(key) = fields.next() {
+                    let value = fields.next().ok_or_else(|| anyhow!("env: {key} has no value"))?;
+                    pairs.push((unescape(key), unescape(value)));
+                }
+                ShellMessage::Env(pairs)
+            },
+            "alias" => ShellMessage::Alias(unescape(next("text")?)),
             "key" => ShellMessage::Key {
                 name: next("name")?.to_owned(),
             },
@@ -222,6 +235,19 @@ mod tests {
             cursor: 0,
             text: String::new(),
         });
+        assert_eq!(
+            ShellMessage::parse("env\tPATH\t/bin:/usr/bin\tMULTI\ta\\nb\tEMPTY\t").unwrap(),
+            ShellMessage::Env(vec![
+                ("PATH".into(), "/bin:/usr/bin".into()),
+                ("MULTI".into(), "a\nb".into()),
+                ("EMPTY".into(), String::new()),
+            ])
+        );
+        assert_eq!(ShellMessage::parse("env").unwrap(), ShellMessage::Env(vec![]));
+        assert_eq!(
+            ShellMessage::parse("alias\tg=git\\nll='ls -l'").unwrap(),
+            ShellMessage::Alias("g=git\nll='ls -l'".into())
+        );
         assert_eq!(ShellMessage::parse("key\tshift+tab").unwrap(), ShellMessage::Key {
             name: "shift+tab".into()
         });
@@ -241,6 +267,8 @@ mod tests {
             "buffer\tx\t3\ttext",
             "buffer\t1\tx\ttext",
             "buffer\t1\t3",
+            "env\tKEY_WITHOUT_VALUE",
+            "alias",
             "hello\tpid\t\t",
             "focus\t2",
             "focus",
