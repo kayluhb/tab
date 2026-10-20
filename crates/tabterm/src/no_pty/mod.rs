@@ -30,7 +30,7 @@ use protocol::{
 };
 use session::{
     Session,
-    action_inserts,
+    action_awaits_insert,
 };
 use tab_log::{
     LogArgs,
@@ -386,7 +386,7 @@ fn handle_shell_message(
             return LinkOutput {
                 reply: Some(LinkMessage::Key {
                     taken: action.is_some(),
-                    expect_buffer: action.as_deref().is_some_and(action_inserts),
+                    expect_buffer: action.as_deref().is_some_and(action_awaits_insert),
                 }),
                 ..Default::default()
             };

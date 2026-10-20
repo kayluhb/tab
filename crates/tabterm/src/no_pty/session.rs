@@ -172,9 +172,16 @@ impl Session {
     }
 }
 
-/// Whether the desktop answers an intercepted action by changing the buffer
-pub fn action_inserts(action: &str) -> bool {
-    action.starts_with("insert") || action == "execute"
+/// Whether the key widget should wait for the desktop's insert for this action. Only
+/// a widget can run the line, so it waits for the actions that always insert and can
+/// run it. The common-prefix actions insert nothing when there is no common prefix
+/// (the popup shakes, as in PTY mode); their inserts come through the push handler,
+/// so a Tab with nothing to insert does not stall the shell.
+pub fn action_awaits_insert(action: &str) -> bool {
+    matches!(
+        action,
+        "insertSelected" | "insertSelectedAndExecute" | "insertCommonPrefixOrInsertSelected" | "execute"
+    )
 }
 
 fn whoami_hostname() -> Option<String> {
@@ -330,24 +337,25 @@ mod tests {
     }
 
     #[test]
-    fn knows_which_actions_insert() {
+    fn knows_which_actions_await_an_insert() {
         for action in [
             "insertSelected",
-            "insertCommonPrefix",
-            "insertCommonPrefixOrNavigateDown",
             "insertSelectedAndExecute",
+            "insertCommonPrefixOrInsertSelected",
             "execute",
         ] {
-            assert!(action_inserts(action), "{action}");
+            assert!(action_awaits_insert(action), "{action}");
         }
         for action in [
+            "insertCommonPrefix",
+            "insertCommonPrefixOrNavigateDown",
             "navigateDown",
             "navigateUp",
             "hideAutocomplete",
             "toggleDescription",
             "toggleHistoryMode",
         ] {
-            assert!(!action_inserts(action), "{action}");
+            assert!(!action_awaits_insert(action), "{action}");
         }
     }
 

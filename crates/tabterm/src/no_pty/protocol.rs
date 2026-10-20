@@ -42,9 +42,10 @@ pub enum ShellMessage {
 /// A message to the shell
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkMessage {
-    /// Answer to [`ShellMessage::Key`]: whether tabterm took the key, and whether a
-    /// buffer will follow on the push connection. zle can only run a line from inside
-    /// a widget, so the key widget waits for that buffer instead of the push handler.
+    /// Answer to [`ShellMessage::Key`]: whether tabterm took the key, and whether the
+    /// key widget should wait for the buffer that follows on the push connection. zle
+    /// can only run a line from inside a widget, so for actions that can run it the
+    /// widget reads that buffer instead of the push handler.
     Key { taken: bool, expect_buffer: bool },
     /// Replace the edit buffer if it is still at `seq` (any buffer if `None`), and
     /// run it if `execute`
