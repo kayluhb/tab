@@ -103,15 +103,21 @@ impl Session {
             self.cursor = (self.cursor as i64 + offset).clamp(0, len) as usize;
         }
 
-        for _ in 0..request.deletion.unwrap_or(0) {
+        for _ in 0..request.deletion.unwrap_or(0).min(self.cursor as u64) {
             self.delete_before_cursor();
         }
 
-        // A PTY runs the line on a newline, which is how the popup passes Enter through
+        // A PTY runs the line on a newline, which is how the popup passes Enter through.
+        // Keys after it would go to the next prompt, so they are dropped.
         let mut execute = request.immediate == Some(true);
         if let Some(insertion) = &request.insertion {
-            let text = insertion.trim_end_matches(['\r', '\n']);
-            execute |= text.len() != insertion.len();
+            let text = match insertion.find(['\r', '\n']) {
+                Some(newline) => {
+                    execute = true;
+                    &insertion[..newline]
+                },
+                None => insertion.as_str(),
+            };
             self.type_text(text);
         }
 
@@ -125,16 +131,21 @@ impl Session {
         while let Some(c) = chars.next() {
             match c {
                 '\x08' | '\x7f' => self.delete_before_cursor(),
-                '\x1b' => {
-                    let rest = chars.as_str();
-                    if let Some(after) = rest.strip_prefix("[D") {
-                        self.cursor = self.cursor.saturating_sub(1);
-                        chars = after.chars();
-                    } else if let Some(after) = rest.strip_prefix("[C") {
-                        self.cursor = (self.cursor + 1).min(self.buffer.chars().count());
-                        chars = after.chars();
-                    }
-                    // Drop any other escape: zsh would not insert it either
+                '\x1b' => match chars.next() {
+                    // CSI: parameter and intermediate bytes, then one final byte
+                    Some('[') => {
+                        let seq = chars.as_str();
+                        let end = seq.find(|c: char| ('\x40'..='\x7e').contains(&c));
+                        let params = &seq[..end.unwrap_or(seq.len())];
+                        if params.is_empty() {
+                            self.arrow_key(seq.chars().next());
+                        }
+                        chars = seq[end.map_or(seq.len(), |end| end + 1)..].chars();
+                    },
+                    // SS3, which a terminal in application cursor mode sends for arrows
+                    Some('O') => self.arrow_key(chars.next()),
+                    // A meta key or a lone ESC runs a zsh widget; neither inserts text
+                    _ => {},
                 },
                 _ => {
                     let at = char_to_byte(&self.buffer, self.cursor);
@@ -142,6 +153,14 @@ impl Session {
                     self.cursor += 1;
                 },
             }
+        }
+    }
+
+    fn arrow_key(&mut self, key: Option<char>) {
+        match key {
+            Some('D') => self.cursor = self.cursor.saturating_sub(1),
+            Some('C') => self.cursor = (self.cursor + 1).min(self.buffer.chars().count()),
+            _ => {},
         }
     }
 
@@ -362,10 +381,56 @@ mod tests {
     }
 
     #[test]
+    fn insertion_backspace_deletes_a_whole_char() {
+        let mut s = session("aé", 2);
+        s.apply_insert(&insert("\x08"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("a", 1));
+    }
+
+    #[test]
+    fn insertion_keys_stop_at_the_ends() {
+        let mut s = session("ab", 1);
+        s.apply_insert(&insert("\x08\x08\x1b[D\x1b[DX"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("Xb", 1));
+    }
+
+    #[test]
+    fn insertion_arrow_keys_in_application_mode() {
+        let mut s = session("ab", 2);
+        s.apply_insert(&insert("\x1bODX\x1bOC"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("aXb", 3));
+    }
+
+    #[test]
     fn insertion_drops_other_escapes() {
+        // Up arrow, alt+left and meta-b: zsh runs a widget for each
+        for escape in ["\x1b[A", "\x1b[1;3D", "\x1bb"] {
+            let mut s = session("", 0);
+            s.apply_insert(&insert(&format!("a{escape}b")));
+            assert_eq!((s.buffer.as_str(), s.cursor), ("ab", 2), "{escape:?}");
+        }
+
         let mut s = session("", 0);
-        s.apply_insert(&insert("a\x1bb"));
-        assert_eq!((s.buffer.as_str(), s.cursor), ("ab", 2));
+        s.apply_insert(&insert("a\x1b"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("a", 1));
+    }
+
+    #[test]
+    fn insertion_newline_runs_the_line_before_later_keys() {
+        // A `{cursor}` move comes after the suggestion, so after its newline
+        let mut s = session("", 0);
+        assert!(s.apply_insert(&insert("ls\n\x1b[D")));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("ls", 2));
+    }
+
+    #[test]
+    fn huge_deletion_stops_at_start() {
+        let mut s = session("ab", 1);
+        s.apply_insert(&InsertTextRequest {
+            deletion: Some(u64::MAX),
+            ..Default::default()
+        });
+        assert_eq!((s.buffer.as_str(), s.cursor), ("b", 0));
     }
 
     #[test]
