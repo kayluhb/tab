@@ -380,7 +380,7 @@ fn handle_shell_message(
     LinkOutput::default()
 }
 
-/// Handles a request both sockets can carry. Returns a buffer to push to the shell.
+/// Handles a request both sockets can carry. Returns a buffer or ghost text to push to the shell.
 fn handle_request(session: &mut Session, request: FigtermRequest) -> (Option<LinkMessage>, Option<FigtermResponse>) {
     match request {
         FigtermRequest::InsertText(request) => {
@@ -432,8 +432,14 @@ fn handle_request(session: &mut Session, request: FigtermRequest) -> (Option<Lin
             (None, None)
         },
         FigtermRequest::SetInlineSuggestion(request) => {
-            INLINE_SUGGESTION.set(request.buffer, request.suffix);
-            (None, None)
+            // Pushed so the shell's ghost text needs no process per keystroke. The cache
+            // still serves `inline-suggestion` callers on the tabterm socket.
+            INLINE_SUGGESTION.set(request.buffer.clone(), request.suffix.clone());
+            let push = LinkMessage::Ghost {
+                buffer: request.buffer,
+                suffix: request.suffix,
+            };
+            (Some(push), None)
         },
         FigtermRequest::InsertOnNewCmd(command) => {
             *INSERT_ON_NEW_CMD.lock().unwrap() = Some((command.text, command.bracketed, command.execute));
@@ -560,8 +566,8 @@ async fn accept_shells(listener: UnixListener, shell_tx: mpsc::UnboundedSender<S
 }
 
 /// Serves one shell connection. A connection that starts with `push` only
-/// receives buffers; any other connection sends messages and gets answers to
-/// `key` and `prompt`.
+/// receives buffers and ghost text; any other connection sends messages and
+/// gets answers to `key` and `prompt`.
 async fn serve_shell(stream: UnixStream, shell_tx: mpsc::UnboundedSender<ShellEvent>) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -609,6 +615,7 @@ mod tests {
     use tab_proto::figterm::{
         InsertTextRequest,
         SetBufferRequest,
+        SetInlineSuggestionRequest,
     };
 
     use super::*;
@@ -661,6 +668,26 @@ mod tests {
                 cursor: 3,
                 text: "pwd".into(),
                 execute: false,
+            })
+        );
+    }
+
+    #[test]
+    fn inline_suggestion_is_pushed_as_ghost_text() {
+        let mut s = session("git ch", 1);
+        let (push, response) = handle_request(
+            &mut s,
+            FigtermRequest::SetInlineSuggestion(SetInlineSuggestionRequest {
+                buffer: "git ch".into(),
+                suffix: "eckout".into(),
+            }),
+        );
+        assert!(response.is_none());
+        assert_eq!(
+            push,
+            Some(LinkMessage::Ghost {
+                buffer: "git ch".into(),
+                suffix: "eckout".into(),
             })
         );
     }
