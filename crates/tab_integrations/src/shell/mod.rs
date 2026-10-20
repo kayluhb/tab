@@ -820,6 +820,35 @@ mod test {
     }
 
     #[test]
+    fn zsh_no_pty_keeps_link_when_sourced_twice() {
+        if Command::new("zsh").arg("--version").output().is_err() {
+            return;
+        }
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        script.write_all(include_bytes!("scripts/no_pty.zsh")).unwrap();
+        let output = Command::new("zsh")
+            .args([
+                "-f",
+                "-c",
+                r#"_tab_link_fd=99 _tab_link_seq=7
+                source "$1"; source "$1"
+                print -r -- "$_tab_link_fd $_tab_link_seq ${(qq)preexec_functions} ${(qq)zshexit_functions}""#,
+                "zsh",
+            ])
+            .arg(script.path())
+            .env("TABTERM_MODE", "no-pty")
+            .env("TABTERM_LINK_SOCKET", "/nonexistent")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "99 7 '_tab_link_preexec' '_tab_link_focus_off'"
+        );
+    }
+
+    #[test]
     fn test_legacy_codewhisperer_regex() {
         let re = regex::Regex::new(
             &DotfileShellIntegration {

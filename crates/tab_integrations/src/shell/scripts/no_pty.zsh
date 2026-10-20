@@ -395,9 +395,11 @@ if _tab_link_active; then
   autoload -Uz add-zle-hook-widget
   add-zle-hook-widget line-pre-redraw _tab_link_report
   add-zle-hook-widget line-init _tab_link_line_init
-  # Its own hook: fig_preexec does nothing in no-PTY mode
-  preexec_functions=("${(@)preexec_functions:#_tab_link_preexec}" _tab_link_preexec)
-  zshexit_functions=("${(@)zshexit_functions:#_tab_link_focus_off}" _tab_link_focus_off)
+  # Its own hook: fig_preexec does nothing in no-PTY mode. add-zsh-hook adds
+  # each hook once, so sourcing this file again adds no copy.
+  autoload -Uz add-zsh-hook
+  add-zsh-hook preexec _tab_link_preexec
+  add-zsh-hook zshexit _tab_link_focus_off
   # The popup's keys are bound when tabterm sends them, once connected
   _tab_link_init_keys
   _tab_link_bind_focus
