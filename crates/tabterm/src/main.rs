@@ -419,6 +419,10 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
     builder.env_remove(TAB_START_TEXT);
     builder.env_remove(TAB_SHELL_EXTRA_ARGS);
     builder.env_remove(TAB_EXECUTION_STRING);
+    // A shell started from a no-PTY shell (e.g. in tmux) inherits its link. Under
+    // this PTY it must not report to that session or skip its prompt markers.
+    builder.env_remove("TABTERM_MODE");
+    builder.env_remove("TABTERM_LINK_SOCKET");
 
     if let Ok(dir) = std::env::current_dir() {
         builder.cwd(dir);
