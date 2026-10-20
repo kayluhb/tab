@@ -20,6 +20,15 @@ use crate::{
     SHELL_ENVIRONMENT_VARIABLES,
 };
 
+const BACKSPACE: char = '\x08';
+const DELETE: char = '\x7f';
+const ESC: char = '\x1b';
+/// Final bytes of the arrow key escape sequences (`ESC [ D`, `ESC O C`, ...)
+const ARROW_LEFT: char = 'D';
+const ARROW_RIGHT: char = 'C';
+/// A PTY runs the line on either of these
+const NEWLINES: [char; 2] = ['\r', '\n'];
+
 pub struct Session {
     pub session_id: String,
     pub pid: i32,
@@ -113,10 +122,10 @@ impl Session {
         // line that ran, so they are dropped. A newline before more text stays in the line.
         let mut execute = request.immediate == Some(true);
         if let Some(insertion) = &request.insertion {
-            let text = match insertion.rfind(['\r', '\n']) {
+            let text = match insertion.rfind(NEWLINES) {
                 Some(newline) if only_keys(&insertion[newline + 1..]) => {
                     execute = true;
-                    insertion[..newline].trim_end_matches(['\r', '\n'])
+                    insertion[..newline].trim_end_matches(NEWLINES)
                 },
                 _ => insertion.as_str(),
             };
@@ -129,15 +138,15 @@ impl Session {
     /// Types `text` at the cursor the way zsh reads it from a PTY. The popup replaces
     /// what the user typed with backspaces, and moves the cursor with `ESC [ D`.
     fn type_text(&mut self, text: &str) {
-        let mut chars = text.chars();
-        while let Some(c) = chars.next() {
-            match c {
-                '\x08' | '\x7f' => self.delete_before_cursor(),
-                '\x1b' => self.arrow_key(read_escape(&mut chars)),
-                _ => {
+        for input in Inputs(text.chars()) {
+            match input {
+                Input::Delete => self.delete_before_cursor(),
+                Input::Escape(key) => self.arrow_key(key),
+                Input::Text(run) => {
+                    // One insert per run of text, so a long insertion stays linear
                     let at = char_to_byte(&self.buffer, self.cursor);
-                    self.buffer.insert(at, c);
-                    self.cursor += 1;
+                    self.buffer.insert_str(at, run);
+                    self.cursor += run.chars().count();
                 },
             }
         }
@@ -145,8 +154,8 @@ impl Session {
 
     fn arrow_key(&mut self, key: Option<char>) {
         match key {
-            Some('D') => self.cursor = self.cursor.saturating_sub(1),
-            Some('C') => self.cursor = (self.cursor + 1).min(self.buffer.chars().count()),
+            Some(ARROW_LEFT) => self.cursor = self.cursor.saturating_sub(1),
+            Some(ARROW_RIGHT) => self.cursor = (self.cursor + 1).min(self.buffer.chars().count()),
             _ => {},
         }
     }
@@ -220,34 +229,65 @@ fn char_to_byte(text: &str, chars: usize) -> usize {
     text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i)
 }
 
+/// One key or run of text in an insertion, as zsh reads it from a PTY
+enum Input<'a> {
+    Delete,
+    /// An escape sequence, with its arrow key if it is one
+    Escape(Option<char>),
+    Text(&'a str),
+}
+
+/// Splits an insertion into keys and runs of text
+struct Inputs<'a>(Chars<'a>);
+
+impl<'a> Iterator for Inputs<'a> {
+    type Item = Input<'a>;
+
+    fn next(&mut self) -> Option<Input<'a>> {
+        let rest = self.0.as_str();
+        Some(match self.0.next()? {
+            BACKSPACE | DELETE => Input::Delete,
+            ESC => Input::Escape(read_escape(&mut self.0)),
+            _ => {
+                let end = rest.find([BACKSPACE, DELETE, ESC]).unwrap_or(rest.len());
+                self.0 = rest[end..].chars();
+                Input::Text(&rest[..end])
+            },
+        })
+    }
+}
+
 /// Reads the escape sequence after an ESC. Returns its arrow key, if it is one.
 fn read_escape(chars: &mut Chars<'_>) -> Option<char> {
-    match chars.next() {
-        // CSI: parameter and intermediate bytes, then one final byte
+    let rest = chars.as_str();
+    match rest.chars().next() {
+        // CSI: parameter and intermediate bytes (0x20-0x3f), then one final byte (0x40-0x7e).
+        // A malformed sequence ends at the first other char, which stays in the text.
         Some('[') => {
-            let seq = chars.as_str();
-            let end = seq.find(|c: char| ('\x40'..='\x7e').contains(&c));
-            *chars = seq[end.map_or(seq.len(), |end| end + 1)..].chars();
-            if end == Some(0) { seq.chars().next() } else { None }
+            let seq = &rest[1..];
+            let params = seq.find(|ch: char| !(' '..='?').contains(&ch)).unwrap_or(seq.len());
+            let final_byte = seq[params..].chars().next().filter(|ch| ('@'..='~').contains(ch));
+            *chars = seq[params + final_byte.map_or(0, char::len_utf8)..].chars();
+            final_byte.filter(|_| params == 0)
         },
         // SS3, which a terminal in application cursor mode sends for arrows
-        Some('O') => chars.next(),
-        // A meta key or a lone ESC runs a zsh widget; neither inserts text
-        _ => None,
+        Some('O') => {
+            chars.next();
+            chars.next()
+        },
+        // A lone ESC; a second ESC starts its own sequence
+        None | Some(ESC) => None,
+        // A meta key runs a zsh widget and inserts no text
+        Some(_) => {
+            chars.next();
+            None
+        },
     }
 }
 
 /// Whether `text` holds only keys (backspaces and escapes), and no text to insert
 fn only_keys(text: &str) -> bool {
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x08' | '\x7f' => {},
-            '\x1b' => _ = read_escape(&mut chars),
-            _ => return false,
-        }
-    }
-    true
+    !Inputs(text.chars()).any(|input| matches!(input, Input::Text(_)))
 }
 
 #[cfg(test)]
@@ -433,10 +473,49 @@ mod tests {
     }
 
     #[test]
+    fn insertion_keeps_text_after_a_malformed_escape() {
+        // A CSI ends at the first char that is not a parameter, intermediate or final byte
+        for (insertion, buffer) in [("a\x1b[12\nfoo", "a\nfoo"), ("a\x1b[123", "a"), ("a\x1b[", "a")] {
+            let mut s = session("", 0);
+            s.apply_insert(&insert(insertion));
+            assert_eq!(s.buffer, buffer, "{insertion:?}");
+        }
+    }
+
+    #[test]
+    fn insertion_second_escape_starts_its_own_sequence() {
+        let mut s = session("", 0);
+        s.apply_insert(&insert("xy\x1b\x1b[DZ"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("xZy", 2));
+    }
+
+    #[test]
+    fn insertion_arrow_keys_over_multibyte_text() {
+        let mut s = session("", 0);
+        s.apply_insert(&insert("éü\x1b[Dß"));
+        assert_eq!((s.buffer.as_str(), s.cursor, s.cursor_bytes()), ("éßü", 2, 4));
+    }
+
+    #[test]
+    fn insertion_long_text_is_inserted_whole() {
+        let text = "é".repeat(100_000);
+        let mut s = session("ab", 1);
+        s.apply_insert(&insert(&text));
+        assert_eq!((s.buffer.len(), s.cursor), (text.len() + 2, 100_001));
+    }
+
+    #[test]
     fn insertion_newline_runs_the_line_before_later_keys() {
         // A `{cursor}` move comes after the suggestion, so after its newline
         let mut s = session("", 0);
         assert!(s.apply_insert(&insert("ls\n\x1b[D")));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("ls", 2));
+
+        let mut s = session("", 0);
+        assert!(s.apply_insert(&InsertTextRequest {
+            immediate: Some(true),
+            ..insert("ls\n\x1b[D")
+        }));
         assert_eq!((s.buffer.as_str(), s.cursor), ("ls", 2));
     }
 
