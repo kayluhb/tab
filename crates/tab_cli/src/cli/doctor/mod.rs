@@ -84,6 +84,8 @@ use tab_util::env_var::{
     PROCESS_LAUNCHED_BY_TAB,
     TAB_PARENT,
     TAB_TERM,
+    TABTERM_LINK_SOCKET,
+    TABTERM_MODE,
     TABTERM_SESSION_ID,
 };
 use tab_util::macos::BUNDLE_CONTENTS_INFO_PLIST_PATH;
@@ -627,6 +629,28 @@ impl DoctorCheck for FigIntegrationsCheck {
         //        fix: None,
         //    });
         //}
+
+        // zsh runs without the PTY by default, so TAB_TERM is unset. tabterm runs in the background
+        // and the shell reports to it on the link socket.
+        if std::env::var(TABTERM_MODE).as_deref() == Ok("no-pty") {
+            let session_id = std::env::var_os(TABTERM_SESSION_ID);
+            let link_socket = std::env::var_os(TABTERM_LINK_SOCKET);
+            return match (&session_id, &link_socket) {
+                (Some(_), Some(socket)) if PathBuf::from(socket).exists() => Ok(()),
+                _ => Err(DoctorError::Error {
+                    reason: format!(
+                        "{PTY_BINARY_NAME} is not running in the background for this terminal, please try restarting your terminal"
+                    )
+                    .into(),
+                    info: vec![
+                        format!("{TABTERM_SESSION_ID}={}", session_id.unwrap_or_default().to_string_lossy()).into(),
+                        format!("{TABTERM_LINK_SOCKET}={}", link_socket.unwrap_or_default().to_string_lossy()).into(),
+                    ],
+                    fix: None,
+                    error: None,
+                }),
+            };
+        }
 
         match tab_os_shim::Env::new().q_term().as_deref() {
             Ok(env!("CARGO_PKG_VERSION")) => Ok(()),

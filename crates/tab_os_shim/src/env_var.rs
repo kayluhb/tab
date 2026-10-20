@@ -54,6 +54,12 @@ define_env_vars! {
     /// Set if qterm is running inside tmux, contains the version
     TAB_TERM_TMUX = "TAB_TERM_TMUX",
 
+    /// Set to `no-pty` when tabterm serves the shell from the background instead of a PTY
+    TABTERM_MODE = "TABTERM_MODE",
+
+    /// The socket a no-PTY shell reports to tabterm on
+    TABTERM_LINK_SOCKET = "TABTERM_LINK_SOCKET",
+
     /// Disables autocomplete in qterm when set to a non-empty value
     TAB_DISABLE_AUTOCOMPLETE = "TAB_DISABLE_AUTOCOMPLETE",
 
