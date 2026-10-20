@@ -86,7 +86,7 @@ impl Session {
 
     /// Applies an insert from the desktop, in the order PTY mode types it: catch up
     /// with `insertion_buffer`, move by `offset`, delete, insert. Returns whether
-    /// to run the line.
+    /// to run the line: `immediate`, or a trailing newline, which a PTY would run.
     pub fn apply_insert(&mut self, request: &InsertTextRequest) -> bool {
         if let Some(expected) = &request.insertion_buffer {
             // The popup computed the insert against `expected`; edit from there
@@ -109,13 +109,17 @@ impl Session {
             self.buffer.remove(at);
         }
 
+        // A PTY runs the line on a newline, which is how the popup passes Enter through
+        let mut execute = request.immediate == Some(true);
         if let Some(insertion) = &request.insertion {
+            let text = insertion.trim_end_matches(['\r', '\n']);
+            execute |= text.len() != insertion.len();
             let at = char_to_byte(&self.buffer, self.cursor);
-            self.buffer.insert_str(at, insertion);
-            self.cursor += insertion.chars().count();
+            self.buffer.insert_str(at, text);
+            self.cursor += text.chars().count();
         }
 
-        request.immediate == Some(true)
+        execute
     }
 
     /// The action bound to a key the shell reports, if tabterm should take it now
@@ -275,6 +279,20 @@ mod tests {
             immediate: Some(true),
             ..insert("")
         }));
+    }
+
+    #[test]
+    fn trailing_newline_runs_the_line() {
+        // The popup passes Enter through by inserting a newline, which a PTY would run
+        for newline in ["\n", "\r", "\r\n"] {
+            let mut s = session("git status", 10);
+            assert!(s.apply_insert(&insert(newline)), "{newline:?}");
+            assert_eq!((s.buffer.as_str(), s.cursor), ("git status", 10), "{newline:?}");
+        }
+
+        let mut s = session("git che", 7);
+        assert!(s.apply_insert(&insert("ckout\n")));
+        assert_eq!(s.buffer, "git checkout");
     }
 
     #[test]
