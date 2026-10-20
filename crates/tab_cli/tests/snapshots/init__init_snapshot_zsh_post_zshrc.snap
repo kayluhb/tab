@@ -246,7 +246,8 @@ _tab_link_disconnect() {
 _tab_link_connect() {
   [[ -n "$_tab_link_fd" ]] && return 0
   _tab_link_active || return 1
-  [[ -S "$TABTERM_LINK_SOCKET" ]] || return 1
+  # Only a socket this user owns: tabterm made it in a private folder
+  [[ -S "$TABTERM_LINK_SOCKET" && -O "$TABTERM_LINK_SOCKET" ]] || return 1
   zmodload zsh/net/socket 2>/dev/null || return 1
 
   zsocket "$TABTERM_LINK_SOCKET" 2>/dev/null || return 1

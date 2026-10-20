@@ -21,6 +21,7 @@ use std::time::Duration;
 use anyhow::{
     Context as _,
     Result,
+    bail,
 };
 use flume::Sender;
 use protocol::{
@@ -64,7 +65,9 @@ use tab_proto::remote_hooks::{
 };
 use tab_util::directories;
 use tokio::io::{
+    AsyncBufRead,
     AsyncBufReadExt,
+    AsyncReadExt as _,
     AsyncWriteExt,
     BufReader,
 };
@@ -577,19 +580,69 @@ async fn accept_shells(listener: UnixListener, shell_tx: mpsc::UnboundedSender<S
     }
 }
 
+/// Longest line tabterm reads from the shell; a longer one drops the connection
+const MAX_LINE_BYTES: usize = 1 << 20;
+
+/// Reads one line without its newline, failing if it is longer than
+/// [`MAX_LINE_BYTES`]. Returns `None` at the end of the stream.
+async fn read_line(reader: &mut (impl AsyncBufRead + Unpin), buf: &mut Vec<u8>) -> Result<Option<String>> {
+    buf.clear();
+    let read = (&mut *reader)
+        .take(MAX_LINE_BYTES as u64 + 1)
+        .read_until(b'\n', buf)
+        .await?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    if buf.len() > MAX_LINE_BYTES {
+        bail!("line longer than {MAX_LINE_BYTES} bytes");
+    }
+    Ok(Some(String::from_utf8_lossy(buf).into_owned()))
+}
+
+/// The pid of the process on the other end, if it runs as this user. The socket's
+/// folder is already private; this is defence in depth.
+fn peer_pid(stream: &UnixStream) -> Result<Option<i32>> {
+    let cred = stream.peer_cred()?;
+    if cred.uid() != nix::unistd::getuid().as_raw() {
+        bail!("connection from uid {}", cred.uid());
+    }
+    Ok(cred.pid())
+}
+
 /// Serves one shell connection. A connection that starts with `push` only
 /// receives buffers and ghost text; any other connection sends messages and
 /// gets answers to `key` and `prompt`.
 async fn serve_shell(stream: UnixStream, shell_tx: mpsc::UnboundedSender<ShellEvent>) {
+    let peer_pid = match peer_pid(&stream) {
+        Ok(pid) => pid,
+        Err(err) => {
+            warn!(%err, "Refused shell connection");
+            return;
+        },
+    };
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
 
     let mut first = true;
-    while let Ok(Some(line)) = lines.next_line().await {
-        let message = match ShellMessage::parse(&line) {
+    loop {
+        let line = match read_line(&mut reader, &mut buf).await {
+            Ok(Some(line)) => line,
+            Ok(None) => return,
+            Err(err) => {
+                warn!(%err, "Dropping shell connection");
+                return;
+            },
+        };
+        let mut message = match ShellMessage::parse(&line) {
             Ok(message) => message,
             Err(err) => {
-                warn!(%err, %line, "Bad message from shell");
+                // Not the line itself: it can hold the user's command line
+                warn!(%err, "Bad message from shell");
                 continue;
             },
         };
@@ -603,6 +656,11 @@ async fn serve_shell(stream: UnixStream, shell_tx: mpsc::UnboundedSender<ShellEv
                 }
             }
             return;
+        }
+
+        // Trust the kernel over the pid the shell reports
+        if let (ShellMessage::Hello { pid, .. }, Some(peer_pid)) = (&mut message, peer_pid) {
+            *pid = peer_pid;
         }
 
         let reply = if matches!(message, ShellMessage::Key { .. } | ShellMessage::Prompt { .. }) {
@@ -682,6 +740,27 @@ mod tests {
                 execute: false,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn reads_lines_up_to_the_limit() {
+        let mut input = format!("buffer\t1\t2\tls\n{}\nlast", "a".repeat(MAX_LINE_BYTES)).into_bytes();
+        let mut reader = BufReader::new(input.as_slice());
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_line(&mut reader, &mut buf).await.unwrap().as_deref(),
+            Some("buffer\t1\t2\tls")
+        );
+        assert_eq!(
+            read_line(&mut reader, &mut buf).await.unwrap().unwrap().len(),
+            MAX_LINE_BYTES
+        );
+        assert_eq!(read_line(&mut reader, &mut buf).await.unwrap().as_deref(), Some("last"));
+        assert_eq!(read_line(&mut reader, &mut buf).await.unwrap(), None);
+
+        input = "a".repeat(MAX_LINE_BYTES + 1).into_bytes();
+        let mut reader = BufReader::new(input.as_slice());
+        assert!(read_line(&mut reader, &mut buf).await.is_err());
     }
 
     #[test]
