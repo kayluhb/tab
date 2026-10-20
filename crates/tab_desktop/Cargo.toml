@@ -74,6 +74,7 @@ tao = { version = "0.31.1", features = ["serde"] }
 tempfile.workspace = true
 time.workspace = true
 tokio.workspace = true
+which.workspace = true
 tracing.workspace = true
 tray-icon = { version = "0.19.2", default-features = false }
 url = { workspace = true, features = ["serde"] }

@@ -28,10 +28,24 @@ if [ -z "${SHOULD_TABTERM_LAUNCH:-}" ]; then
   SHOULD_TABTERM_LAUNCH=$?
 fi
 
+# zsh talks to the desktop app directly, with no PTY in between. TAB_SHELL_LINK=0
+# goes back to tabterm.
+_tab_link_on=""
+if [[ -n "${ZSH_NAME:-}" ]] \
+  && [[ "${TAB_SHELL_LINK:-1}" != 0 ]] \
+  && [[ -t 1 ]] && [[ $- == *i* ]] \
+  && [[ -z "${TAB_TERM:-}" && -z "${PROCESS_LAUNCHED_BY_TAB:-}" ]] \
+  && [[ ("${SHOULD_TABTERM_LAUNCH}" -eq 0) || ("${SHOULD_TABTERM_LAUNCH}" -eq 2) ]] \
+  && zmodload zsh/net/socket 2>/dev/null
+then
+  _tab_link_on=1
+fi
+
 # Only launch figterm if current session is not already inside PTY and command exists.
 # PWSH var is set when launched by `pwsh -Login`, in which case we don't want to init.
 # It is not necessary in Fish.
 if   [[ -t 1 ]] \
+  && [[ -z "${_tab_link_on:-}" ]] \
   && [[ -z "${PROCESS_LAUNCHED_BY_TAB:-}" ]] \
   && command -v {{PTY_BINARY_NAME}} 1>/dev/null 2>&1 \
   && [[ ("${SHOULD_TABTERM_LAUNCH}" -eq 0) || (("${SHOULD_TABTERM_LAUNCH}" -eq 2) && (-z "${TAB_TERM:-}" || (-z "${TAB_TERM_TMUX:-}" && -n "${TMUX:-}"))) ]]

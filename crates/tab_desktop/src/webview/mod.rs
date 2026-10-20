@@ -283,6 +283,23 @@ impl WebviewManager {
             },
         ));
 
+        {
+            let figterm_state = self.figterm_state.clone();
+            let hook = RemoteHook {
+                notifications_state: self.notifications_state.clone(),
+                proxy: self.event_loop.create_proxy(),
+            };
+            tokio::spawn(async move {
+                let result = match tab_util::directories::shell_link_socket_path() {
+                    Ok(path) => crate::shell_link::start(path, figterm_state, hook).await,
+                    Err(err) => Err(err.into()),
+                };
+                if let Err(err) = result {
+                    error!(%err, "Unable to start shell link");
+                }
+            });
+        }
+
         let (api_handler_tx, mut api_handler_rx) = tokio::sync::mpsc::unbounded_channel::<(WindowId, String)>();
         let (sync_api_handler_tx, mut sync_api_handler_rx) = tokio::sync::mpsc::unbounded_channel::<(
             WindowId,

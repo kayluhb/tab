@@ -169,7 +169,11 @@ impl ShellExt for Shell {
             (Shell::Fish, When::Pre) => include_str!("scripts/pre.fish"),
             (Shell::Fish, When::Post) => include_str!("scripts/post.fish"),
             (Shell::Zsh, When::Pre) => include_str!("scripts/pre.sh"),
-            (Shell::Zsh, When::Post) => include_str!("scripts/post.zsh"),
+            (Shell::Zsh, When::Post) => concat!(
+                include_str!("scripts/shell_link.zsh"),
+                "\n",
+                include_str!("scripts/post.zsh")
+            ),
             (Shell::Bash, When::Pre) => {
                 concat!(
                     "function __fig_source_bash_preexec() {\n",

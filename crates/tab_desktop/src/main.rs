@@ -9,6 +9,7 @@ mod platform;
 pub mod protocol;
 mod remote_ipc;
 mod request;
+mod shell_link;
 mod tray;
 mod utils;
 mod webview;
