@@ -809,14 +809,16 @@ mod test {
         }
     }
 
-    /// Runs `script` in `zsh -i` with stub binaries and returns the arguments of each tabterm
-    /// launch, or `None` if zsh is not installed. `$1` in `script` is the rendered pre.sh.
+    /// Runs `script` in an interactive `shell` with stub binaries and returns the arguments of each
+    /// tabterm launch, or `None` if the shell is not installed. `$1` in `script` is the rendered
+    /// pre.sh.
     #[cfg(unix)]
-    fn zsh_pre_tabterm_launches(script: &str, env: &[(&str, &str)]) -> Option<Vec<String>> {
+    fn pre_tabterm_launches(shell: Shell, script: &str, env: &[(&str, &str)]) -> Option<Vec<String>> {
         use std::os::unix::fs::PermissionsExt;
 
-        if Command::new("zsh").arg("--version").output().is_err() {
-            eprintln!("zsh not found, skipping");
+        let name = shell.as_str();
+        if Command::new(name).arg("--version").output().is_err() {
+            eprintln!("{name} not found, skipping");
             return None;
         }
 
@@ -830,7 +832,10 @@ mod test {
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
-        write_exe(CLI_BINARY_NAME, "[ \"$2\" = get-shell ] && echo /bin/zsh\nexit 0");
+        write_exe(
+            CLI_BINARY_NAME,
+            &format!("[ \"$2\" = get-shell ] && echo /bin/{name}\nexit 0"),
+        );
         write_exe(
             PTY_BINARY_NAME,
             &format!(
@@ -840,12 +845,17 @@ mod test {
         );
 
         let pre = dir.path().join("pre.sh");
-        std::fs::write(&pre, Shell::Zsh.get_fig_integration_source(&When::Pre)).unwrap();
+        std::fs::write(&pre, shell.get_fig_integration_source(&When::Pre)).unwrap();
 
         // pre.sh only starts tabterm when stdout is a terminal.
         let pty = nix::pty::openpty(None, None).unwrap();
-        let status = Command::new("zsh")
-            .args(["-f", "-i", "-c", script, "zsh"])
+        let no_startup_files: &[&str] = match shell {
+            Shell::Bash => &["--norc", "--noprofile"],
+            _ => &["-f"],
+        };
+        let status = Command::new(name)
+            .args(no_startup_files)
+            .args(["-i", "-c", script, name])
             .arg(&pre)
             .env_clear()
             .env("HOME", dir.path())
@@ -866,7 +876,7 @@ mod test {
     #[cfg(unix)]
     #[test]
     fn zsh_pre_starts_one_no_pty_tabterm_when_sourced_twice() {
-        let Some(launches) = zsh_pre_tabterm_launches(r#"source "$1"; source "$1""#, &[]) else {
+        let Some(launches) = pre_tabterm_launches(Shell::Zsh, r#"source "$1"; source "$1""#, &[]) else {
             return;
         };
         assert_eq!(launches.len(), 1, "tabterm launches: {launches:?}");
@@ -881,7 +891,7 @@ mod test {
     #[cfg(unix)]
     #[test]
     fn zsh_pre_starts_no_pty_tabterm_with_inherited_link_started() {
-        let Some(launches) = zsh_pre_tabterm_launches(r#"source "$1""#, &[("TAB_LINK_STARTED", "1")]) else {
+        let Some(launches) = pre_tabterm_launches(Shell::Zsh, r#"source "$1""#, &[("TAB_LINK_STARTED", "1")]) else {
             return;
         };
         assert_eq!(launches.len(), 1, "tabterm launches: {launches:?}");
@@ -889,6 +899,16 @@ mod test {
             launches[0].starts_with("--no-pty --shell-pid "),
             "tabterm launches: {launches:?}"
         );
+    }
+
+    /// bash always uses the PTY. An inherited TAB_LINK_STARTED must not stop the PTY start.
+    #[cfg(unix)]
+    #[test]
+    fn bash_pre_starts_pty_tabterm_with_inherited_link_started() {
+        let Some(launches) = pre_tabterm_launches(Shell::Bash, r#"source "$1""#, &[("TAB_LINK_STARTED", "1")]) else {
+            return;
+        };
+        assert_eq!(launches, [""], "tabterm launches: {launches:?}");
     }
 
     #[test]
