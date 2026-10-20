@@ -413,7 +413,9 @@ fn handle_shell_message(
 fn handle_request(session: &mut Session, request: FigtermRequest) -> (Option<LinkMessage>, Option<FigtermResponse>) {
     match request {
         FigtermRequest::InsertText(request) => {
-            if session.preexec && !request.insert_during_command() {
+            // A PTY types `insert_during_command` text into the running program. Without one, the
+            // shell would apply it at the next prompt, so drop every insert while a command runs.
+            if session.preexec {
                 return (None, None);
             }
             let execute = session.apply_insert(&request);
@@ -728,6 +730,24 @@ mod tests {
                 execute: false,
             })
         );
+    }
+
+    #[test]
+    fn insert_during_a_command_is_dropped() {
+        let mut s = session("", 5);
+        s.preexec = true;
+        let (push, response) = handle_request(
+            &mut s,
+            FigtermRequest::InsertText(InsertTextRequest {
+                insertion: Some("Testing tabterm...\n".into()),
+                immediate: Some(true),
+                insert_during_command: Some(true),
+                ..Default::default()
+            }),
+        );
+        assert!(push.is_none(), "{push:?}");
+        assert!(response.is_none());
+        assert_eq!(s.buffer, "");
     }
 
     fn shell_message(session: &mut Session, message: ShellMessage) -> LinkOutput {
