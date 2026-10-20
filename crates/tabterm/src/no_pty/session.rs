@@ -233,11 +233,11 @@ pub fn action_awaits_insert(action: &str) -> bool {
 /// control+1, have none.
 fn shell_key_name(event: &KeyEvent) -> Option<String> {
     let name = match (event.key, event.modifiers) {
-        (KeyCode::Char(c), Modifiers::CTRL) if c.is_ascii_alphabetic() => {
-            return Some(format!("control+{}", c.to_ascii_lowercase()));
+        (KeyCode::Char(letter), Modifiers::CTRL) if letter.is_ascii_alphabetic() => {
+            return Some(format!("control+{}", letter.to_ascii_lowercase()));
         },
-        (KeyCode::Char(c), Modifiers::ALT) if c.is_ascii_alphabetic() => {
-            return Some(format!("option+{}", c.to_ascii_lowercase()));
+        (KeyCode::Char(letter), Modifiers::ALT) if letter.is_ascii_alphabetic() => {
+            return Some(format!("option+{}", letter.to_ascii_lowercase()));
         },
         (KeyCode::Tab, Modifiers::SHIFT) => "shift+tab",
         (key, Modifiers::NONE) => match key {
@@ -495,6 +495,54 @@ mod tests {
 
         s.forget_bound_keys();
         assert_eq!(s.take_bind_update(), Some(keys), "a new connection gets the keys again");
+    }
+
+    #[test]
+    fn releases_esc_while_a_command_runs() {
+        let mut s = session("ls", 2);
+        s.interceptor.set_actions(
+            &[
+                action("hideAutocomplete", &["esc"]),
+                action("insertSelected", &["enter"]),
+            ],
+            true,
+        );
+        s.start_command("ls".into());
+        s.interceptor.set_intercept(true);
+        s.interceptor.set_window_visible(true);
+        let keys = s.shell_keys();
+        assert!(!keys.contains("esc"));
+        assert!(keys.contains("enter"));
+    }
+
+    #[test]
+    fn names_each_unmodified_key() {
+        for (key, name) in [
+            (KeyCode::Tab, Some("tab")),
+            (KeyCode::Enter, Some("enter")),
+            (KeyCode::Escape, Some("esc")),
+            (KeyCode::UpArrow, Some("up")),
+            (KeyCode::ApplicationUpArrow, Some("up")),
+            (KeyCode::DownArrow, Some("down")),
+            (KeyCode::ApplicationDownArrow, Some("down")),
+            (KeyCode::LeftArrow, Some("left")),
+            (KeyCode::ApplicationLeftArrow, Some("left")),
+            (KeyCode::RightArrow, Some("right")),
+            (KeyCode::ApplicationRightArrow, Some("right")),
+            (KeyCode::Home, Some("home")),
+            (KeyCode::End, Some("end")),
+            (KeyCode::PageUp, Some("pageup")),
+            (KeyCode::PageDown, Some("pagedown")),
+            (KeyCode::Backspace, Some("backspace")),
+            (KeyCode::Delete, Some("delete")),
+            (KeyCode::Char('a'), None),
+        ] {
+            let event = KeyEvent {
+                key,
+                modifiers: Modifiers::NONE,
+            };
+            assert_eq!(shell_key_name(&event).as_deref(), name, "{key:?}");
+        }
     }
 
     #[test]

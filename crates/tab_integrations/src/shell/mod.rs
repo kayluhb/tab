@@ -809,6 +809,108 @@ mod test {
         }
     }
 
+    /// Runs `script` in an interactive `shell` with stub binaries and returns the arguments of each
+    /// tabterm launch, or `None` if the shell is not installed. `$1` in `script` is the rendered
+    /// pre.sh.
+    #[cfg(unix)]
+    fn pre_tabterm_launches(shell: Shell, script: &str, env: &[(&str, &str)]) -> Option<Vec<String>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let name = shell.as_str();
+        if Command::new(name).arg("--version").output().is_err() {
+            eprintln!("{name} not found, skipping");
+            return None;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let launches = dir.path().join("launches");
+
+        let write_exe = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_exe(
+            CLI_BINARY_NAME,
+            &format!("[ \"$2\" = get-shell ] && echo /bin/{name}\nexit 0"),
+        );
+        write_exe(
+            PTY_BINARY_NAME,
+            &format!(
+                "echo \"$*\" >> '{}'\nprintf 'session\\n/tmp/link.sock\\n'",
+                launches.display()
+            ),
+        );
+
+        let pre = dir.path().join("pre.sh");
+        std::fs::write(&pre, shell.get_fig_integration_source(&When::Pre)).unwrap();
+
+        // pre.sh only starts tabterm when stdout is a terminal.
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let no_startup_files: &[&str] = match shell {
+            Shell::Bash => &["--norc", "--noprofile"],
+            _ => &["-f"],
+        };
+        let status = Command::new(name)
+            .args(no_startup_files)
+            .args(["-i", "-c", script, name])
+            .arg(&pre)
+            .env_clear()
+            .env("HOME", dir.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .envs(env.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::from(pty.slave))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let launches = std::fs::read_to_string(&launches).unwrap_or_default();
+        Some(launches.lines().map(str::to_owned).collect())
+    }
+
+    /// A login zsh sources pre.sh from both .zprofile and .zshrc. The second source must reuse the
+    /// no-PTY tabterm the first one started.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_pre_starts_one_no_pty_tabterm_when_sourced_twice() {
+        let Some(launches) = pre_tabterm_launches(Shell::Zsh, r#"source "$1"; source "$1""#, &[]) else {
+            return;
+        };
+        assert_eq!(launches.len(), 1, "tabterm launches: {launches:?}");
+        assert!(
+            launches[0].starts_with("--no-pty --shell-pid "),
+            "tabterm launches: {launches:?}"
+        );
+    }
+
+    /// A child shell that inherits TAB_LINK_STARTED (for example with allexport) must still start
+    /// its own tabterm.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_pre_starts_no_pty_tabterm_with_inherited_link_started() {
+        let Some(launches) = pre_tabterm_launches(Shell::Zsh, r#"source "$1""#, &[("TAB_LINK_STARTED", "1")]) else {
+            return;
+        };
+        assert_eq!(launches.len(), 1, "tabterm launches: {launches:?}");
+        assert!(
+            launches[0].starts_with("--no-pty --shell-pid "),
+            "tabterm launches: {launches:?}"
+        );
+    }
+
+    /// bash always uses the PTY. An inherited TAB_LINK_STARTED must not stop the PTY start.
+    #[cfg(unix)]
+    #[test]
+    fn bash_pre_starts_pty_tabterm_with_inherited_link_started() {
+        let Some(launches) = pre_tabterm_launches(Shell::Bash, r#"source "$1""#, &[("TAB_LINK_STARTED", "1")]) else {
+            return;
+        };
+        assert_eq!(launches, [""], "tabterm launches: {launches:?}");
+    }
+
     #[test]
     fn shellcheck_bash_pre() {
         check_script(Shell::Bash, When::Pre);

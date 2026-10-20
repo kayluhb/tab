@@ -43,6 +43,11 @@ _tab_link_disconnect() {
   [[ -n "$_tab_link_fd" ]] && exec {_tab_link_fd}>&-
   _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
   _tab_link_env_sent="" _tab_link_alias_sent=""
+  _tab_link_ghost_buffer="" _tab_link_ghost_suffix=""
+  # Give the popup's keys back: no `bind` line can release them now. tabterm
+  # sends the full set again on the next connection.
+  (( ${#_tab_link_bound} )) && _tab_link_bind
+  return 0
 }
 
 _tab_link_connect() {
@@ -274,8 +279,9 @@ _tab_link_refresh_ghost() {
 # for a buffer.
 _tab_link_handle_push() {
   case "$1" in
-    ghost$'\t'*) _tab_link_set_ghost "$1" ;;
-    bind|bind$'\t'*) _tab_link_bind "${(@)${(@ps:\t:)1}[2,-1]}" ;;
+    # Handled whatever the helpers return, so the key widget keeps waiting
+    ghost$'\t'*) _tab_link_set_ghost "$1"; return 0 ;;
+    bind|bind$'\t'*) _tab_link_bind "${(@)${(@ps:\t:)1}[2,-1]}"; return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -338,6 +344,7 @@ _tab_link_init_keys() {
 _tab_link_bind() {
   local -A want
   local name seq keymap binding
+  local -a keymaps=(main emacs viins)
   for name in "$@"; do
     want[$name]=1
   done
@@ -345,7 +352,7 @@ _tab_link_bind() {
   for name in "${(@k)_tab_link_bound}"; do
     (( ${+want[$name]} )) && continue
     for seq in "${(@k)_tab_link_key_name[(R)$name]}"; do
-      for keymap in main emacs viins; do
+      for keymap in "${keymaps[@]}"; do
         binding=${_tab_link_fallback[$keymap:$seq]}
         if [[ -z "$binding" ]]; then
           continue
@@ -362,7 +369,7 @@ _tab_link_bind() {
   for name in "${(@k)want}"; do
     (( ${+_tab_link_bound[$name]} )) && continue
     for seq in "${(@k)_tab_link_key_name[(R)$name]}"; do
-      for keymap in main emacs viins; do
+      for keymap in "${keymaps[@]}"; do
         if (( ! ${+_tab_link_fallback[$keymap:$seq]} )); then
           binding=${${(z)$(bindkey -M "$keymap" -- "$seq" 2>/dev/null)}[2]}
           # Already ours: this keymap is main, which was just bound
