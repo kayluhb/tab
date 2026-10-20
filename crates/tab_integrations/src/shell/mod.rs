@@ -819,33 +819,53 @@ mod test {
         check_script(Shell::Bash, When::Post);
     }
 
-    #[test]
-    fn zsh_no_pty_keeps_link_when_sourced_twice() {
+    /// Runs `commands` in `zsh -f` in no-PTY mode, with the path to no_pty.zsh as
+    /// `$1`, and returns stdout. Returns `None` if zsh is not installed.
+    fn run_no_pty_zsh(commands: &str) -> Option<String> {
         if Command::new("zsh").arg("--version").output().is_err() {
-            return;
+            return None;
         }
 
         let mut script = tempfile::NamedTempFile::new().unwrap();
         script.write_all(include_bytes!("scripts/no_pty.zsh")).unwrap();
         let output = Command::new("zsh")
-            .args([
-                "-f",
-                "-c",
-                r#"_tab_link_fd=99 _tab_link_seq=7
-                source "$1"; source "$1"
-                print -r -- "$_tab_link_fd $_tab_link_seq ${(qq)preexec_functions} ${(qq)zshexit_functions}""#,
-                "zsh",
-            ])
+            .args(["-f", "-c", commands, "zsh"])
             .arg(script.path())
             .env("TABTERM_MODE", "no-pty")
             .env("TABTERM_LINK_SOCKET", "/nonexistent")
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            "99 7 '_tab_link_preexec' '_tab_link_focus_off'"
-        );
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    #[test]
+    fn zsh_no_pty_keeps_link_when_sourced_twice() {
+        let Some(stdout) = run_no_pty_zsh(
+            r#"_tab_link_fd=99 _tab_link_seq=7
+            source "$1"; source "$1"
+            print -r -- "$_tab_link_fd $_tab_link_seq ${(qq)preexec_functions} ${(qq)zshexit_functions}""#,
+        ) else {
+            return;
+        };
+        assert_eq!(stdout, "99 7 '_tab_link_preexec' '_tab_link_focus_off'");
+    }
+
+    #[test]
+    fn zsh_no_pty_rebinds_keys_when_sourced_twice() {
+        // .zshrc rebinds Tab between the two sources; unbinding Tab after gives
+        // back the new widget
+        let Some(stdout) = run_no_pty_zsh(
+            r#"source "$1"; _tab_link_bind tab
+            bindkey -M main '^I' my-complete
+            source "$1"
+            print -r -- "$(bindkey -M main '^I')"
+            _tab_link_bind
+            print -r -- "$(bindkey -M main '^I')""#,
+        ) else {
+            return;
+        };
+        assert_eq!(stdout, "\"^I\" tab-link-key\n\"^I\" my-complete");
     }
 
     #[test]

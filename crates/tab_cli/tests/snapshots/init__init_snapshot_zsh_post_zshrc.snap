@@ -584,6 +584,23 @@ _tab_link_bind() {
   done
 }
 
+# Binds the popup's keys again when this file is sourced again: .zshrc can
+# rebind a key and drop ours, and tabterm sends `bind` only when the keys
+# change. Forgets the widget a key had where the key is not ours now, so the
+# key gives back the user's new widget.
+_tab_link_rebind() {
+  local -a names=("${(@k)_tab_link_bound}")
+  local entry binding
+  (( ${#names} )) || return 0
+  for entry in "${(@k)_tab_link_fallback}"; do
+    [[ -n "${_tab_link_fallback[$entry]}" ]] || continue
+    binding=${${(z)$(bindkey -M "${entry%%:*}" -- "${entry#*:}" 2>/dev/null)}[2]}
+    [[ "$binding" == tab-link-key ]] || unset "_tab_link_fallback[$entry]"
+  done
+  _tab_link_bound=()
+  _tab_link_bind "${names[@]}"
+}
+
 # Focus reports, bound in every keymap so they never insert text
 _tab_link_bind_focus() {
   local keymap
@@ -611,6 +628,7 @@ if _tab_link_active; then
   add-zsh-hook zshexit _tab_link_focus_off
   # The popup's keys are bound when tabterm sends them, once connected
   _tab_link_init_keys
+  _tab_link_rebind
   _tab_link_bind_focus
 fi
 
