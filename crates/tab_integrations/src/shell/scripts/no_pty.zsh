@@ -311,7 +311,7 @@ if _tab_link_active; then
   autoload -Uz add-zle-hook-widget
   add-zle-hook-widget line-pre-redraw _tab_link_report
   add-zle-hook-widget line-init _tab_link_line_init
-  # Its own hook, not fig_preexec: fig_precmd also calls that after ^C, with no command
+  # Its own hook: fig_preexec does nothing in no-PTY mode
   preexec_functions+=(_tab_link_preexec)
   zshexit_functions+=(_tab_link_focus_off)
   _tab_link_bind_keys
