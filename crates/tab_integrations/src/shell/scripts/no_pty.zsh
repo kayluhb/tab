@@ -44,7 +44,7 @@ _tab_link_connect() {
   if zsocket "$TABTERM_LINK_SOCKET" 2>/dev/null; then
     _tab_link_push_fd=$REPLY
     print -r -u "$_tab_link_push_fd" -- push
-    zle -F -w "$_tab_link_push_fd" tab-link-on-push 2>/dev/null
+    zle -F -w "$_tab_link_push_fd" _tab_link_on_push 2>/dev/null
   fi
 
   _tab_link_escape "${TTY:-}"
@@ -138,11 +138,17 @@ _tab_link_key() {
   fi
   case "$reply" in
     $'key\t1\t1')
-      # Apply the insert here: only a widget can run the line
+      # Apply the insert here: only a widget can run the line. Ghost text may
+      # arrive before it on the same connection.
       local line
-      if [[ -n "$_tab_link_push_fd" ]] && IFS= read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; then
+      while [[ -n "$_tab_link_push_fd" ]] && IFS= read -r -u "$_tab_link_push_fd" -t 0.2 line 2>/dev/null; do
+        if [[ "$line" == ghost$'\t'* ]]; then
+          _tab_link_set_ghost "$line"
+          continue
+        fi
         _tab_link_apply "$line" && zle accept-line
-      fi
+        break
+      done
       return ;;
     $'key\t1\t0') return ;;
   esac
@@ -160,12 +166,16 @@ _tab_link_parse_set() {
   fields=("${(@ps:\t:)1}")
   [[ "${fields[1]}" == set ]] || return 1
   _tab_link_set_seq=${fields[2]} _tab_link_set_cursor=${fields[3]} _tab_link_set_execute=${fields[4]}
-  local text=${(pj:\t:)fields[5,-1]}
-  # Undo the escapes, holding `\\` aside as NUL so `\\n` stays a backslash and an n
-  text=${text//\\\\/$'\0'}
-  text=${text//\\t/$'\t'}
-  text=${text//\\n/$'\n'}
-  REPLY=${text//$'\0'/\\}
+  _tab_link_unescape "${(pj:\t:)fields[5,-1]}"
+}
+
+# Undoes _tab_link_escape into REPLY, holding `\\` aside as NUL so `\\n` stays
+# a backslash and an n
+_tab_link_unescape() {
+  REPLY=${1//\\\\/$'\0'}
+  REPLY=${REPLY//\\t/$'\t'}
+  REPLY=${REPLY//\\n/$'\n'}
+  REPLY=${REPLY//$'\0'/\\}
 }
 
 # Sets the line from a `set` line; succeeds only if the line should run. Drops
@@ -180,15 +190,47 @@ _tab_link_apply() {
   [[ "$_tab_link_set_execute" == 1 ]]
 }
 
-# Applies a buffer tabterm pushes while zsh is idle. zle does not finish a line
-# from a -F handler, so a pushed `execute` waits for the next key.
+# The popup's top suggestion, which the `specs` inline strategy reads
+typeset -g _tab_link_ghost_buffer="" _tab_link_ghost_suffix=""
+
+# Stores the suggestion from a `ghost` line, and redraws the ghost text if the
+# line still matches
+_tab_link_set_ghost() {
+  local -a fields
+  fields=("${(@ps:\t:)1}")
+  _tab_link_unescape "${fields[2]}"
+  _tab_link_ghost_buffer=$REPLY
+  _tab_link_unescape "${fields[3]}"
+  _tab_link_ghost_suffix=$REPLY
+  [[ "$_tab_link_ghost_buffer" == "$BUFFER" && " ${TAB_AUTOSUGGEST_STRATEGY[*]} " == *" specs "* ]] \
+    && _tab_link_refresh_ghost
+}
+
+# Redraws the inline suggestions plugin's ghost text for the line. The plugin
+# skips the push widget: its wrapper puts the old ghost text back whenever the
+# line did not change, which would hide a pushed suggestion.
+_tab_link_refresh_ghost() {
+  # shellcheck disable=SC2154
+  (( ${+widgets[autosuggest-fetch]} )) || return
+  zle autosuggest-clear
+  (( ${#BUFFER} && ! ${+_TAB_AUTOSUGGEST_DISABLED} )) && zle autosuggest-fetch
+}
+
+# Handles a line tabterm pushes while zsh is idle: a buffer or ghost text. zle
+# does not finish a line from a -F handler, so a pushed `execute` waits for the
+# next key.
 _tab_link_on_push() {
   local line
   if ! IFS= read -r -u "$1" line 2>/dev/null; then
     _tab_link_disconnect
     return
   fi
-  _tab_link_apply "$line"
+  if [[ "$line" == ghost$'\t'* ]]; then
+    _tab_link_set_ghost "$line"
+  else
+    _tab_link_apply "$line"
+    _tab_link_refresh_ghost
+  fi
   zle -R
 }
 
@@ -226,10 +268,11 @@ _tab_link_bind_keys() {
 }
 
 if _tab_link_active; then
-  # Widget names without a leading underscore, so the inline suggestions plugin
-  # wraps them and refreshes its ghost text when they change the line
+  # No leading underscore, so the inline suggestions plugin wraps the key widget
+  # and refreshes its ghost text when it changes the line. The push widget has
+  # one, so the plugin skips it; it refreshes the ghost text itself.
   zle -N tab-link-key _tab_link_key
-  zle -N tab-link-on-push _tab_link_on_push
+  zle -N _tab_link_on_push
   zle -N _tab_link_focus_out
   zle -N _tab_link_focus_in
   autoload -Uz add-zle-hook-widget

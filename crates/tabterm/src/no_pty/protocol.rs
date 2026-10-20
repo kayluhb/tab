@@ -50,6 +50,8 @@ pub enum LinkMessage {
         text: String,
         execute: bool,
     },
+    /// The popup's top suggestion: ghost text to show after `buffer`
+    Ghost { buffer: String, suffix: String },
     /// Answer to [`ShellMessage::Prompt`] when there is nothing to start the line with
     Nothing,
 }
@@ -146,6 +148,9 @@ impl LinkMessage {
             } => {
                 let seq = seq.map(|seq| seq.to_string()).unwrap_or_default();
                 format!("set\t{seq}\t{cursor}\t{}\t{}\n", u8::from(*execute), escape(text))
+            },
+            LinkMessage::Ghost { buffer, suffix } => {
+                format!("ghost\t{}\t{}\n", escape(buffer), escape(suffix))
             },
         }
     }
@@ -282,6 +287,14 @@ mod tests {
             }
             .to_line(),
             "set\t\t2\t0\tls\n"
+        );
+        assert_eq!(
+            LinkMessage::Ghost {
+                buffer: "git ch".into(),
+                suffix: "eckout\t".into(),
+            }
+            .to_line(),
+            "ghost\tgit ch\teckout\\t\n"
         );
     }
 }
