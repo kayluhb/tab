@@ -84,6 +84,8 @@ use tab_util::env_var::{
     PROCESS_LAUNCHED_BY_TAB,
     TAB_PARENT,
     TAB_TERM,
+    TABTERM_LINK_SOCKET,
+    TABTERM_MODE,
     TABTERM_SESSION_ID,
 };
 use tab_util::macos::BUNDLE_CONTENTS_INFO_PLIST_PATH;
@@ -580,6 +582,47 @@ impl DoctorCheck for SettingsCorruptionCheck {
     }
 }
 
+/// zsh runs without the PTY by default, so TAB_TERM is unset. tabterm runs in the background and
+/// the shell reports to it on the link socket. Returns `None` when the PTY check applies, including
+/// a PTY shell that inherited the no-PTY variables from a parent zsh.
+fn no_pty_link_check(env: &tab_os_shim::Env) -> Option<Result<(), DoctorError>> {
+    if env.get_os(TAB_TERM).is_some() || env.get(TABTERM_MODE).as_deref() != Ok("no-pty") {
+        return None;
+    }
+
+    let session_id = env.get_os(TABTERM_SESSION_ID);
+    let link_socket = env.get_os(TABTERM_LINK_SOCKET);
+    // Connect instead of checking that the path exists: a killed tabterm leaves its socket file.
+    let linked = session_id.is_some()
+        && link_socket
+            .as_ref()
+            .is_some_and(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok());
+    if linked {
+        return Some(Ok(()));
+    }
+
+    Some(Err(DoctorError::Error {
+        reason: format!(
+            "{PTY_BINARY_NAME} is not running in the background for this terminal, please try restarting your terminal"
+        )
+        .into(),
+        info: vec![
+            format!(
+                "{TABTERM_SESSION_ID}={}",
+                session_id.unwrap_or_default().to_string_lossy()
+            )
+            .into(),
+            format!(
+                "{TABTERM_LINK_SOCKET}={}",
+                link_socket.unwrap_or_default().to_string_lossy()
+            )
+            .into(),
+        ],
+        fix: None,
+        error: None,
+    }))
+}
+
 struct FigIntegrationsCheck;
 
 #[async_trait]
@@ -627,6 +670,10 @@ impl DoctorCheck for FigIntegrationsCheck {
         //        fix: None,
         //    });
         //}
+
+        if let Some(result) = no_pty_link_check(&tab_os_shim::Env::new()) {
+            return result;
+        }
 
         match tab_os_shim::Env::new().q_term().as_deref() {
             Ok(env!("CARGO_PKG_VERSION")) => Ok(()),
@@ -2055,4 +2102,73 @@ pub async fn doctor_cli(all: bool, strict: bool) -> Result<ExitCode> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixListener;
+
+    use super::*;
+
+    fn check(vars: &[(&str, &str)]) -> Option<Result<(), DoctorError>> {
+        no_pty_link_check(&tab_os_shim::Env::from_slice(vars))
+    }
+
+    #[test]
+    fn no_pty_link_check_passes_with_a_live_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("link.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let socket = socket.to_str().unwrap();
+
+        let result = check(&[
+            (TABTERM_MODE, "no-pty"),
+            (TABTERM_SESSION_ID, "session"),
+            (TABTERM_LINK_SOCKET, socket),
+        ]);
+        assert!(matches!(result, Some(Ok(()))), "{result:?}");
+    }
+
+    #[test]
+    fn no_pty_link_check_fails_with_a_stale_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("link.sock");
+        drop(UnixListener::bind(&socket).unwrap());
+        assert!(socket.exists());
+        let socket = socket.to_str().unwrap();
+
+        let result = check(&[
+            (TABTERM_MODE, "no-pty"),
+            (TABTERM_SESSION_ID, "session"),
+            (TABTERM_LINK_SOCKET, socket),
+        ]);
+        assert!(matches!(result, Some(Err(_))), "{result:?}");
+    }
+
+    #[test]
+    fn no_pty_link_check_fails_without_a_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("link.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+
+        let result = check(&[
+            (TABTERM_MODE, "no-pty"),
+            (TABTERM_LINK_SOCKET, socket.to_str().unwrap()),
+        ]);
+        assert!(matches!(result, Some(Err(_))), "{result:?}");
+    }
+
+    #[test]
+    fn no_pty_link_check_defers_to_the_pty_check() {
+        assert!(check(&[]).is_none());
+        // A PTY shell started from a no-PTY zsh inherits TABTERM_MODE.
+        assert!(
+            check(&[
+                (TAB_TERM, "1.0.0"),
+                (TABTERM_MODE, "no-pty"),
+                (TABTERM_SESSION_ID, "session"),
+            ])
+            .is_none()
+        );
+    }
 }
