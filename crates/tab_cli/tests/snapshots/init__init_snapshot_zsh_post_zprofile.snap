@@ -217,11 +217,16 @@ if [[ -n "${ZSH_NAME:-}" ]]; then
 # crates/tabterm/src/no_pty/protocol.rs. Lines with text are read with `IFS=`,
 # or read would strip spaces at the ends of the text.
 
-# Kept if this file is sourced again (e.g. `source ~/.zshrc`), so the shell
-# keeps its connection instead of opening a second one
-typeset -g _tab_link_fd=${_tab_link_fd-} _tab_link_push_fd=${_tab_link_push_fd-} _tab_link_sent=${_tab_link_sent-}
-# Counts buffer reports; tabterm tags each insert with the one it was computed from
-typeset -gi _tab_link_seq=${_tab_link_seq-0}
+# The connection state. Kept if this file is sourced again (e.g. `source
+# ~/.zshrc`), so the shell keeps its connection instead of opening a second one.
+# Set only on the first source, which a function marks: the environment cannot
+# hold a function, so a value imported from the environment is never used.
+if (( ! ${+functions[_tab_link_connect]} )); then
+  typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
+  typeset -g _tab_link_env_sent="" _tab_link_alias_sent="" _tab_link_focus_on=""
+  # Counts buffer reports; tabterm tags each insert with the one it was computed from
+  typeset -gi _tab_link_seq=0
+fi
 # _tab_link_key_name: key sequence -> the name tabterm knows the key by.
 # _tab_link_fallback: keymap:sequence -> the widget the key had before tabterm
 # bound it ('' where that keymap is the same as main). _tab_link_bound: the
@@ -297,8 +302,6 @@ _tab_link_send() {
 # precmd cannot edit the line, so zle-line-init applies it.
 typeset -g _tab_link_start_text="" _tab_link_start_run=""
 
-typeset -g _tab_link_env_sent=${_tab_link_env_sent-} _tab_link_alias_sent=${_tab_link_alias_sent-}
-
 # Sends the exported environment and the aliases, each only when it changed
 # since it was last sent. Built in the shell, with no process or subshell.
 _tab_link_send_context() {
@@ -351,8 +354,6 @@ _tab_link_line_init() {
   _tab_link_start_text=""
   [[ "$_tab_link_start_run" == 1 ]] && zle accept-line
 }
-
-typeset -g _tab_link_focus_on=${_tab_link_focus_on-}
 
 # Stops focus reporting, so commands never see the focus sequences
 _tab_link_focus_off() {
@@ -587,15 +588,27 @@ _tab_link_bind() {
 # Binds the popup's keys again when this file is sourced again: .zshrc can
 # rebind a key and drop ours, and tabterm sends `bind` only when the keys
 # change. Forgets the widget a key had where the key is not ours now, so the
-# key gives back the user's new widget.
+# key gives back the user's new widget. A keymap that was main ('') gets main's
+# widget, as main can be another keymap now (e.g. after `bindkey -v`). Looks up
+# all the keys in one process.
 _tab_link_rebind() {
-  local -a names=("${(@k)_tab_link_bound}")
+  local -a names=("${(@k)_tab_link_bound}") entries=("${(@k)_tab_link_fallback}") lines
+  local -A old=("${(@kv)_tab_link_fallback}")
+  local -i i
   local entry binding
   (( ${#names} )) || return 0
-  for entry in "${(@k)_tab_link_fallback}"; do
-    [[ -n "${_tab_link_fallback[$entry]}" ]] || continue
-    binding=${${(z)$(bindkey -M "${entry%%:*}" -- "${entry#*:}" 2>/dev/null)}[2]}
-    [[ "$binding" == tab-link-key ]] || unset "_tab_link_fallback[$entry]"
+  # One line per entry, x where bindkey fails, so the lines stay in step
+  lines=("${(@f)$(for entry in "${entries[@]}"; do
+    bindkey -M "${entry%%:*}" -- "${entry#*:}" 2>/dev/null || print x
+  done)}")
+  for (( i = 1; i <= ${#entries}; i++ )); do
+    entry=${entries[i]}
+    binding=${${(z)lines[i]}[2]}
+    if [[ "$binding" != tab-link-key ]]; then
+      unset "_tab_link_fallback[$entry]"
+    elif [[ -z "${old[$entry]}" ]]; then
+      _tab_link_fallback[$entry]=${old[main:${entry#*:}]}
+    fi
   done
   _tab_link_bound=()
   _tab_link_bind "${names[@]}"

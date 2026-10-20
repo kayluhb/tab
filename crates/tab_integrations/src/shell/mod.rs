@@ -835,37 +835,91 @@ mod test {
             .env("TABTERM_LINK_SOCKET", "/nonexistent")
             .output()
             .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        // zsh -c exits with the last command's status, so an error in a source
+        // shows only on stderr
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
+    /// Prints Tab's widget in main, emacs and viins, on one line
+    const PRINT_TAB_WIDGETS: &str = r#"print -r -- ${${(z)"$(bindkey -M main '^I')"}[2]} ${${(z)"$(bindkey -M emacs '^I')"}[2]} ${${(z)"$(bindkey -M viins '^I')"}[2]}"#;
+
     #[test]
     fn zsh_no_pty_keeps_link_when_sourced_twice() {
+        // The first source ignores values set before it; the second keeps them
         let Some(stdout) = run_no_pty_zsh(
-            r#"_tab_link_fd=99 _tab_link_seq=7
-            source "$1"; source "$1"
-            print -r -- "$_tab_link_fd $_tab_link_seq ${(qq)preexec_functions} ${(qq)zshexit_functions}""#,
+            r#"_tab_link_fd=5
+            source "$1"
+            print -r -- "[$_tab_link_fd]"
+            _tab_link_fd=99 _tab_link_push_fd=98 _tab_link_sent=s _tab_link_env_sent=e
+            _tab_link_alias_sent=a _tab_link_focus_on=1 _tab_link_seq=7
+            source "$1"
+            print -r -- $_tab_link_fd $_tab_link_push_fd $_tab_link_sent $_tab_link_env_sent \
+              $_tab_link_alias_sent $_tab_link_focus_on $_tab_link_seq
+            print -r -- "${(qq)preexec_functions} ${(qq)zshexit_functions}""#,
         ) else {
             return;
         };
-        assert_eq!(stdout, "99 7 '_tab_link_preexec' '_tab_link_focus_off'");
+        // The zshexit hook stops focus reporting, as _tab_link_focus_on is set
+        assert_eq!(
+            stdout,
+            "[]\n99 98 s e a 1 7\n'_tab_link_preexec' '_tab_link_focus_off'\n\u{1b}[?1004l"
+        );
     }
 
     #[test]
     fn zsh_no_pty_rebinds_keys_when_sourced_twice() {
         // .zshrc rebinds Tab between the two sources; unbinding Tab after gives
         // back the new widget
-        let Some(stdout) = run_no_pty_zsh(
+        let Some(stdout) = run_no_pty_zsh(&format!(
             r#"source "$1"; _tab_link_bind tab
             bindkey -M main '^I' my-complete
             source "$1"
-            print -r -- "$(bindkey -M main '^I')"
+            {PRINT_TAB_WIDGETS}
             _tab_link_bind
-            print -r -- "$(bindkey -M main '^I')""#,
-        ) else {
+            {PRINT_TAB_WIDGETS}"#
+        )) else {
             return;
         };
-        assert_eq!(stdout, "\"^I\" tab-link-key\n\"^I\" my-complete");
+        assert_eq!(
+            stdout,
+            "tab-link-key tab-link-key tab-link-key\nmy-complete my-complete expand-or-complete"
+        );
+    }
+
+    #[test]
+    fn zsh_no_pty_keeps_fallback_when_sourced_twice() {
+        // Nothing rebinds Tab between the two sources; unbinding Tab after gives
+        // back the original widget
+        let Some(stdout) = run_no_pty_zsh(&format!(
+            r#"source "$1"; _tab_link_bind tab
+            source "$1"
+            _tab_link_bind
+            {PRINT_TAB_WIDGETS}"#
+        )) else {
+            return;
+        };
+        assert_eq!(stdout, "expand-or-complete expand-or-complete expand-or-complete");
+    }
+
+    #[test]
+    fn zsh_no_pty_rebinds_keys_after_keymap_change() {
+        // main changes from emacs to viins between the two sources; emacs, the
+        // old main, still gets its original widget back
+        let Some(stdout) = run_no_pty_zsh(&format!(
+            r#"source "$1"; _tab_link_bind tab
+            bindkey -v; bindkey -M main '^I' my-complete
+            source "$1"
+            _tab_link_bind
+            {PRINT_TAB_WIDGETS}"#
+        )) else {
+            return;
+        };
+        assert_eq!(stdout, "my-complete expand-or-complete my-complete");
     }
 
     #[test]
