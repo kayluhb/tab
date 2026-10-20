@@ -1,6 +1,5 @@
 ---
 source: crates/tab_cli/tests/init.rs
-assertion_line: 87
 expression: init
 ---
 TAB_SHELL='/bin/zsh'
@@ -454,20 +453,22 @@ then
 
     # zsh runs without a PTY: tabterm serves it from the background, so the
     # terminal sees the real command. TAB_TERM_PTY=1 forces the PTY. tmux and
-    # SSH still need the PTY.
-    if [[ -n "${ZSH_NAME:-}" && -z "${TAB_TERM_PTY:-}" && -z "${TMUX:-}" && -z "${SSH_TTY:-}" ]]; then
+    # SSH still need the PTY. TAB_LINK_STARTED holds this shell's PID, so it only
+    # stops a second start in this shell (zsh sources pre.sh from .zprofile and
+    # .zshrc). A child shell that inherits it (allexport) still starts its own.
+    if [[ -n "${ZSH_NAME:-}" && "${TAB_LINK_STARTED:-}" != "$$" && -z "${TAB_TERM_PTY:-}" && -z "${TMUX:-}" && -z "${SSH_TTY:-}" ]]; then
       TAB_LINK_OUTPUT="$("${TAB_TERM_PATH}" --no-pty --shell-pid "$$" 2>/dev/null)"
       if [[ "${TAB_LINK_OUTPUT}" == *$'\n'* ]]; then
         export TABTERM_SESSION_ID="${TAB_LINK_OUTPUT%%$'\n'*}"
         export TABTERM_LINK_SOCKET="${TAB_LINK_OUTPUT#*$'\n'}"
         export TABTERM_MODE=no-pty
-        TAB_LINK_STARTED=1
+        TAB_LINK_STARTED="$$"
       fi
       unset TAB_LINK_OUTPUT
     fi
   fi
 
-  if [[ $- == *i* && -z "${TAB_LINK_STARTED:-}" ]]; then
+  if [[ $- == *i* && "${TAB_LINK_STARTED:-}" != "$$" ]]; then
     TAB_EXECUTION_STRING="${BASH_EXECUTION_STRING:=$ZSH_EXECUTION_STRING}"
 
     # Get initial text.
@@ -483,5 +484,4 @@ then
     fi
     TAB_EXECUTION_STRING="${TAB_EXECUTION_STRING}" TAB_START_TEXT="$(printf "%b" "${INITIAL_TEXT}")" TAB_SHELL="${TAB_SHELL}" TAB_IS_LOGIN_SHELL="${TAB_IS_LOGIN_SHELL}" exec -a "${TAB_TERM_NAME}" "${TAB_TERM_PATH}"
   fi
-  unset TAB_LINK_STARTED
 fi
