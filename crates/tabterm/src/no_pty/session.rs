@@ -29,6 +29,8 @@ pub struct Session {
     pub buffer: String,
     /// Cursor position in characters
     pub cursor: usize,
+    /// The shell's number for the last buffer it reported
+    pub seq: u64,
     pub interceptor: KeyInterceptor,
     /// The running command and when it started, for history
     running: Option<(String, SystemTime)>,
@@ -45,6 +47,7 @@ impl Session {
             preexec: false,
             buffer: String::new(),
             cursor: 0,
+            seq: 0,
             interceptor,
             running: None,
         }

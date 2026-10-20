@@ -322,7 +322,12 @@ fn handle_shell_message(
                 Some((text, execute)) => {
                     let cursor = text.chars().count();
                     session.set_buffer(text.clone(), cursor);
-                    LinkMessage::SetBuffer { cursor, text, execute }
+                    LinkMessage::SetBuffer {
+                        seq: None,
+                        cursor,
+                        text,
+                        execute,
+                    }
                 },
                 None => LinkMessage::Nothing,
             };
@@ -335,7 +340,8 @@ fn handle_shell_message(
             session.start_command(command);
             send(new_preexec_hook(session.context()));
         },
-        ShellMessage::Buffer { cursor, text } => {
+        ShellMessage::Buffer { seq, cursor, text } => {
+            session.seq = seq;
             session.set_buffer(text, cursor);
             if autocomplete && !session.preexec {
                 send(new_edit_buffer_hook(
@@ -382,7 +388,10 @@ fn handle_request(session: &mut Session, request: FigtermRequest) -> (Option<Lin
                 return (None, None);
             }
             let execute = session.apply_insert(&request);
+            // Tagged with the buffer the insert was computed from, so the shell drops it
+            // if the user typed since. The shell reports the result at the next seq.
             let push = LinkMessage::SetBuffer {
+                seq: Some(session.seq),
                 cursor: session.cursor,
                 text: session.buffer.clone(),
                 execute,
@@ -394,7 +403,9 @@ fn handle_request(session: &mut Session, request: FigtermRequest) -> (Option<Lin
                 .cursor_position
                 .map_or(request.text.chars().count(), |cursor| cursor as usize);
             session.set_buffer(request.text, cursor);
+            // Replaces the whole line, so it applies whatever the shell holds
             let push = LinkMessage::SetBuffer {
+                seq: None,
                 cursor: session.cursor,
                 text: session.buffer.clone(),
                 execute: false,
@@ -590,5 +601,67 @@ async fn serve_shell(stream: UnixStream, shell_tx: mpsc::UnboundedSender<ShellEv
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tab_proto::figterm::{
+        InsertTextRequest,
+        SetBufferRequest,
+    };
+
+    use super::*;
+
+    fn session(buffer: &str, seq: u64) -> Session {
+        let mut session = Session::new("abc".into(), 1, KeyInterceptor::new());
+        session.set_buffer(buffer.into(), buffer.chars().count());
+        session.seq = seq;
+        session
+    }
+
+    #[test]
+    fn insert_is_tagged_with_the_buffer_it_was_computed_from() {
+        let mut s = session("git ch", 5);
+        let (push, response) = handle_request(
+            &mut s,
+            FigtermRequest::InsertText(InsertTextRequest {
+                insertion: Some("eckout".into()),
+                ..Default::default()
+            }),
+        );
+        assert!(response.is_none());
+        assert_eq!(
+            push,
+            Some(LinkMessage::SetBuffer {
+                seq: Some(5),
+                cursor: 12,
+                text: "git checkout".into(),
+                execute: false,
+            })
+        );
+        // The shell reports the result at the next seq
+        assert_eq!(s.seq, 5);
+    }
+
+    #[test]
+    fn set_buffer_applies_to_any_buffer() {
+        let mut s = session("ls", 3);
+        let (push, _) = handle_request(
+            &mut s,
+            FigtermRequest::SetBuffer(SetBufferRequest {
+                text: "pwd".into(),
+                cursor_position: None,
+            }),
+        );
+        assert_eq!(
+            push,
+            Some(LinkMessage::SetBuffer {
+                seq: None,
+                cursor: 3,
+                text: "pwd".into(),
+                execute: false,
+            })
+        );
     }
 }

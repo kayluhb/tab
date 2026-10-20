@@ -1,6 +1,5 @@
 ---
 source: crates/tab_cli/tests/init.rs
-assertion_line: 94
 expression: init
 ---
 TAB_SHELL='/bin/zsh'
@@ -208,6 +207,8 @@ if [[ -n "${ZSH_NAME:-}" ]]; then
 # crates/tabterm/src/no_pty/protocol.rs.
 
 typeset -g _tab_link_fd="" _tab_link_push_fd="" _tab_link_sent=""
+# Counts buffer reports; tabterm tags each insert with the one it was computed from
+typeset -gi _tab_link_seq=0
 typeset -gA _tab_link_fallback _tab_link_key_name
 
 _tab_link_active() {
@@ -318,8 +319,9 @@ _tab_link_report() {
   local state="$CURSOR"$'\t'"$BUFFER"
   [[ "$state" == "$_tab_link_sent" ]] && return
   _tab_link_sent=$state
+  (( ++_tab_link_seq ))
   _tab_link_escape "$BUFFER"
-  _tab_link_send "buffer"$'\t'"$CURSOR"$'\t'"$REPLY"
+  _tab_link_send "buffer"$'\t'"$_tab_link_seq"$'\t'"$CURSOR"$'\t'"$REPLY"
 }
 
 # Bound to the keys the popup uses. Asks tabterm whether the popup takes the
@@ -347,15 +349,16 @@ _tab_link_key() {
   [[ -n "$fallback" && "$fallback" != undefined-key ]] && zle "$fallback"
 }
 
-# Parses a `set` line: the text into REPLY, its cursor and execute flag into
-# _tab_link_set_cursor and _tab_link_set_execute. Fails for any other line.
-typeset -g _tab_link_set_cursor="" _tab_link_set_execute=""
+# Parses a `set` line: the text into REPLY, its seq, cursor and execute flag into
+# _tab_link_set_seq, _tab_link_set_cursor and _tab_link_set_execute. Fails for
+# any other line.
+typeset -g _tab_link_set_seq="" _tab_link_set_cursor="" _tab_link_set_execute=""
 _tab_link_parse_set() {
   local -a fields
   fields=("${(@ps:\t:)1}")
   [[ "${fields[1]}" == set ]] || return 1
-  _tab_link_set_cursor=${fields[2]} _tab_link_set_execute=${fields[3]}
-  local text=${(pj:\t:)fields[4,-1]}
+  _tab_link_set_seq=${fields[2]} _tab_link_set_cursor=${fields[3]} _tab_link_set_execute=${fields[4]}
+  local text=${(pj:\t:)fields[5,-1]}
   # Undo the escapes, holding `\\` aside as NUL so `\\n` stays a backslash and an n
   text=${text//\\\\/$'\0'}
   text=${text//\\t/$'\t'}
@@ -363,11 +366,15 @@ _tab_link_parse_set() {
   REPLY=${text//$'\0'/\\}
 }
 
-# Sets the line from a `set` line; succeeds only if the line should run
+# Sets the line from a `set` line; succeeds only if the line should run. Drops
+# an insert computed for an older buffer, i.e. the user typed since.
 _tab_link_apply() {
   _tab_link_parse_set "$1" || return 1
+  [[ -z "$_tab_link_set_seq" || "$_tab_link_set_seq" == "$_tab_link_seq" ]] || return 1
   BUFFER=$REPLY
   CURSOR=$_tab_link_set_cursor
+  # Report the new line now, at the next seq, so a following insert lines up
+  _tab_link_report
   [[ "$_tab_link_set_execute" == 1 ]]
 }
 
