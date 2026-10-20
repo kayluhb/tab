@@ -357,9 +357,11 @@ _tab_link_preexec() {
   _tab_link_send "preexec"$'\t'"$REPLY"
 }
 
-# Reports the buffer on every redraw that changed it
+# Reports the buffer on every redraw that changed it, while editing a command
+# line: not in vared or other zle contexts. ^R search runs no redraw hook, so
+# the line is reported once the search ends.
 _tab_link_report() {
-  [[ -n "$_tab_link_fd" ]] || return
+  [[ -n "$_tab_link_fd" ]] && [[ "$CONTEXT" == start || "$CONTEXT" == cont ]] || return
   local state="$CURSOR"$'\t'"$BUFFER"
   [[ "$state" == "$_tab_link_sent" ]] && return
   _tab_link_sent=$state
