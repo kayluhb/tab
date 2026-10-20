@@ -8,7 +8,6 @@ use std::time::{
 };
 
 use alacritty_terminal::Term;
-use alacritty_terminal::term::ShellState;
 use anyhow::Result;
 use flume::Sender;
 use tab_proto::fig::{
@@ -59,7 +58,7 @@ use crate::{
     shell_state_to_context,
 };
 
-fn working_directory(path: Option<&str>, shell_state: &ShellState) -> PathBuf {
+fn working_directory(path: Option<&str>, shell_cwd: Option<PathBuf>) -> PathBuf {
     let map_dir = |path: PathBuf| match path.canonicalize() {
         Ok(path) if path.is_dir() => Some(path),
         Ok(path) => {
@@ -74,13 +73,7 @@ fn working_directory(path: Option<&str>, shell_state: &ShellState) -> PathBuf {
 
     path.map(PathBuf::from)
         .and_then(map_dir)
-        .or_else(|| {
-            shell_state
-                .get_context()
-                .current_working_directory
-                .clone()
-                .and_then(map_dir)
-        })
+        .or_else(|| shell_cwd.and_then(map_dir))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("/"))
 }
@@ -353,7 +346,7 @@ pub async fn process_figterm_message(
     Ok(())
 }
 
-async fn inline_shell_completion_response(buffer: &str) -> FigtermResponseMessage {
+pub(crate) async fn inline_shell_completion_response(buffer: &str) -> FigtermResponseMessage {
     let insert_text = INLINE_SUGGESTION.lookup(buffer, LOOKUP_TIMEOUT).await;
     FigtermResponseMessage {
         response: Some(FigtermResponse::InlineShellCompletion(
@@ -387,6 +380,82 @@ async fn send_figterm_response_hostbound(
     }
 }
 
+/// Runs a spec generator for the desktop and sends back its output. Shared by both
+/// modes; `shell_cwd` is the fallback when the request names no directory.
+pub(crate) fn spawn_run_process(
+    request: tab_proto::remote::RunProcessRequest,
+    shell_cwd: Option<PathBuf>,
+    nonce: Option<u64>,
+    response_tx: Sender<Hostbound>,
+) {
+    use hostbound::response::Response;
+
+    let make_response = move |response: Response| -> Hostbound {
+        Hostbound {
+            packet: Some(hostbound::Packet::Response(hostbound::Response {
+                response: Some(response),
+                nonce,
+            })),
+        }
+    };
+
+    // TODO: we can infer shell as above for execute if no executable is provided.
+    let mut cmd = create_command(
+        &request.executable,
+        working_directory(request.working_directory.as_deref(), shell_cwd),
+    );
+
+    cmd.args(request.arguments);
+    for var in request.env {
+        match var.value {
+            Some(value) => cmd.env(var.key, value),
+            None => cmd.env_remove(var.key),
+        };
+    }
+
+    tokio::spawn(async move {
+        debug!("running command");
+
+        let timeout_duration = request.timeout.map_or(Duration::from_secs(60), Into::into);
+        let command_timeout = tokio::time::timeout(timeout_duration, cmd.output());
+
+        let response = match command_timeout.await {
+            Ok(Ok(output)) => {
+                debug!("command successfully ran");
+                make_response(Response::RunProcess(RunProcessResponse {
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    exit_code: output.status.code().unwrap_or(0),
+                }))
+            },
+            Ok(Err(err)) => {
+                warn!(%err, executable = request.executable, "failed running executable");
+                make_response(Response::Error(format!(
+                    "failed running executable ({}): {err}",
+                    request.executable
+                )))
+            },
+            Err(err) => {
+                warn!(
+                    %err,
+                    executable = request.executable,
+                    timeout_ms =% timeout_duration.as_millis(),
+                    "timed out running executable"
+                );
+                make_response(Response::Error(format!(
+                    "timed out after {}ms running executable ({}): {err}",
+                    timeout_duration.as_millis(),
+                    request.executable,
+                )))
+            },
+        };
+
+        if let Err(err) = response_tx.send_async(response).await {
+            error!(%err, "Failed sending request response");
+        }
+    });
+}
+
 pub async fn process_remote_message(
     clientbound_message: Clientbound,
     main_loop_tx: Sender<MainLoopEvent>,
@@ -396,20 +465,10 @@ pub async fn process_remote_message(
     key_interceptor: &mut KeyInterceptor,
 ) -> Result<()> {
     use clientbound::request::Request;
-    use hostbound::response::Response;
 
     match clientbound_message.packet {
         Some(clientbound::Packet::Request(request)) => {
             let nonce = request.nonce;
-            let make_response = move |response: Response| -> Hostbound {
-                Hostbound {
-                    packet: Some(hostbound::Packet::Response(hostbound::Response {
-                        response: Some(response),
-                        nonce,
-                    })),
-                }
-            };
-
             let figterm_request = match request.request {
                 Some(Request::InsertText(request)) => Some(FigtermRequest::InsertText(request)),
                 Some(Request::Intercept(request)) => Some(FigtermRequest::Intercept(request)),
@@ -417,62 +476,8 @@ pub async fn process_remote_message(
                 Some(Request::InsertOnNewCmd(request)) => Some(FigtermRequest::InsertOnNewCmd(request)),
                 Some(Request::SetInlineSuggestion(request)) => Some(FigtermRequest::SetInlineSuggestion(request)),
                 Some(Request::RunProcess(request)) => {
-                    // TODO: we can infer shell as above for execute if no executable is provided.
-                    let mut cmd = create_command(
-                        &request.executable,
-                        working_directory(request.working_directory.as_deref(), term.shell_state()),
-                    );
-
-                    cmd.args(request.arguments);
-                    for var in request.env {
-                        match var.value {
-                            Some(value) => cmd.env(var.key, value),
-                            None => cmd.env_remove(var.key),
-                        };
-                    }
-
-                    let response_tx = response_tx.clone();
-                    tokio::spawn(async move {
-                        debug!("running command");
-
-                        let timeout_duration = request.timeout.map_or(Duration::from_secs(60), Into::into);
-                        let command_timeout = tokio::time::timeout(timeout_duration, cmd.output());
-
-                        let response = match command_timeout.await {
-                            Ok(Ok(output)) => {
-                                debug!("command successfully ran");
-                                make_response(Response::RunProcess(RunProcessResponse {
-                                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                                    exit_code: output.status.code().unwrap_or(0),
-                                }))
-                            },
-                            Ok(Err(err)) => {
-                                warn!(%err, executable = request.executable, "failed running executable");
-                                make_response(Response::Error(format!(
-                                    "failed running executable ({}): {err}",
-                                    request.executable
-                                )))
-                            },
-                            Err(err) => {
-                                warn!(
-                                    %err,
-                                    executable = request.executable,
-                                    timeout_ms =% timeout_duration.as_millis(),
-                                    "timed out running executable"
-                                );
-                                make_response(Response::Error(format!(
-                                    "timed out after {}ms running executable ({}): {err}",
-                                    timeout_duration.as_millis(),
-                                    request.executable,
-                                )))
-                            },
-                        };
-
-                        if let Err(err) = response_tx.send_async(response).await {
-                            error!(%err, "Failed sending request response");
-                        }
-                    });
+                    let cwd = term.shell_state().get_context().current_working_directory.clone();
+                    spawn_run_process(request, cwd, nonce, response_tx.clone());
                     None
                 },
                 _ => {
