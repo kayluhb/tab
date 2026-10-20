@@ -264,16 +264,27 @@ _tab_link_connect() {
   _tab_link_send "hello"$'\t'"$$"$'\t'"$tty"$'\t'"$REPLY"
 }
 
-# Sends one line; drops the connection if tabterm is gone. If tabterm stopped
-# reading and the socket is full, drops the line instead of blocking the shell.
+# Sends one line; drops the connection if tabterm is gone. Never blocks the
+# shell if tabterm stopped reading: zselect -w only promises room for the
+# socket's low-water mark (2 KB), so the line goes in chunks of at most that,
+# checking each time. A line that cannot start is dropped; one cut off partway
+# drops the connection, as the rest of the protocol would be out of step.
 _tab_link_send() {
   [[ -n "$_tab_link_fd" ]] || return 1
+  local line=$1$'\n'
   local -a ready
-  zselect -t 0 -a ready -w "$_tab_link_fd" 2>/dev/null || return 1
-  if ! print -r -u "$_tab_link_fd" -- "$1" 2>/dev/null; then
-    _tab_link_disconnect
-    return 1
-  fi
+  local -i i
+  # 512 characters is at most 2 KB of UTF-8
+  for (( i = 1; i <= ${#line}; i += 512 )); do
+    if ! zselect -t 0 -a ready -w "$_tab_link_fd" 2>/dev/null; then
+      (( i > 1 )) && _tab_link_disconnect
+      return 1
+    fi
+    if ! print -rn -u "$_tab_link_fd" -- "${line[i,i+511]}" 2>/dev/null; then
+      _tab_link_disconnect
+      return 1
+    fi
+  done
 }
 
 # Text the next line should start with (e.g. a shell started with initial text).
