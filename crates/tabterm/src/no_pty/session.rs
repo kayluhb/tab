@@ -103,10 +103,8 @@ impl Session {
             self.cursor = (self.cursor as i64 + offset).clamp(0, len) as usize;
         }
 
-        for _ in 0..request.deletion.unwrap_or(0).min(self.cursor as u64) {
-            self.cursor -= 1;
-            let at = char_to_byte(&self.buffer, self.cursor);
-            self.buffer.remove(at);
+        for _ in 0..request.deletion.unwrap_or(0) {
+            self.delete_before_cursor();
         }
 
         // A PTY runs the line on a newline, which is how the popup passes Enter through
@@ -114,12 +112,45 @@ impl Session {
         if let Some(insertion) = &request.insertion {
             let text = insertion.trim_end_matches(['\r', '\n']);
             execute |= text.len() != insertion.len();
-            let at = char_to_byte(&self.buffer, self.cursor);
-            self.buffer.insert_str(at, text);
-            self.cursor += text.chars().count();
+            self.type_text(text);
         }
 
         execute
+    }
+
+    /// Types `text` at the cursor the way zsh reads it from a PTY. The popup replaces
+    /// what the user typed with backspaces, and moves the cursor with `ESC [ D`.
+    fn type_text(&mut self, text: &str) {
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x08' | '\x7f' => self.delete_before_cursor(),
+                '\x1b' => {
+                    let rest = chars.as_str();
+                    if let Some(after) = rest.strip_prefix("[D") {
+                        self.cursor = self.cursor.saturating_sub(1);
+                        chars = after.chars();
+                    } else if let Some(after) = rest.strip_prefix("[C") {
+                        self.cursor = (self.cursor + 1).min(self.buffer.chars().count());
+                        chars = after.chars();
+                    }
+                    // Drop any other escape: zsh would not insert it either
+                },
+                _ => {
+                    let at = char_to_byte(&self.buffer, self.cursor);
+                    self.buffer.insert(at, c);
+                    self.cursor += 1;
+                },
+            }
+        }
+    }
+
+    fn delete_before_cursor(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let at = char_to_byte(&self.buffer, self.cursor);
+            self.buffer.remove(at);
+        }
     }
 
     /// The action bound to a key the shell reports, if tabterm should take it now
@@ -303,6 +334,38 @@ mod tests {
             ..Default::default()
         });
         assert_eq!((s.buffer.as_str(), s.cursor), ("b", 0));
+    }
+
+    #[test]
+    fn insertion_backspaces_delete_instead_of_inserting() {
+        // The popup replaces what the user typed by sending backspaces before the suggestion
+        let branch = "fix/variant-image-late-sync";
+        let mut s = session(&format!("gco {branch}"), 31);
+        s.apply_insert(&insert(&format!("{}{branch}", "\x08".repeat(branch.len()))));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("gco fix/variant-image-late-sync", 31));
+
+        let mut s = session("ab", 1);
+        s.apply_insert(&insert("\x08\x08\x7fX"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("Xb", 1));
+    }
+
+    #[test]
+    fn insertion_arrow_keys_move_the_cursor() {
+        // A suggestion with `{cursor}` moves back into the inserted text
+        let mut s = session("git commit -m ", 14);
+        s.apply_insert(&insert("\"\"\x1b[D"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("git commit -m \"\"", 15));
+
+        let mut s = session("ab", 0);
+        s.apply_insert(&insert("\x1b[C\x1b[C\x1b[CX"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("abX", 3));
+    }
+
+    #[test]
+    fn insertion_drops_other_escapes() {
+        let mut s = session("", 0);
+        s.apply_insert(&insert("a\x1bb"));
+        assert_eq!((s.buffer.as_str(), s.cursor), ("ab", 2));
     }
 
     #[test]
