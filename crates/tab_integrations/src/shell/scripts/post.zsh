@@ -1,4 +1,5 @@
-if [[ -n "${ZSH_NAME:-}" ]]; then
+# The OSC hooks below feed tabterm; in shell link mode shell_link.zsh does their job
+if [[ -n "${ZSH_NAME:-}" && -z "${_tab_link_on:-}" ]]; then
 
 # add ~/.local/bin to PATH
 if [[ -d "${HOME}/.local/bin" ]] && [[ ":$PATH:" != *":${HOME}/.local/bin:"* ]]; then
@@ -190,4 +191,6 @@ fi
 
 fi
 
-(command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+if [[ -z "${_tab_link_on:-}" ]]; then
+  (command {{CLI_BINARY_NAME}} _ pre-cmd --alias "$(\alias)" > /dev/null 2>&1 &) >/dev/null 2>&1
+fi

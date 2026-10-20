@@ -6597,6 +6597,7 @@ dependencies = [
  "tray-icon",
  "url",
  "uuid",
+ "which",
  "whoami",
  "wry",
 ]

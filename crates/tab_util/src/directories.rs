@@ -328,6 +328,14 @@ pub fn local_remote_socket_path() -> Result<PathBuf> {
     Ok(host_sockets_dir()?.join("remote.sock"))
 }
 
+/// The socket shells connect to directly, with no tabterm in between
+///
+/// - MacOS: `$TMPDIR/tabrun/shell.sock`
+/// - Linux: `$XDG_RUNTIME_DIR/tabrun/shell.sock`
+pub fn shell_link_socket_path() -> Result<PathBuf> {
+    Ok(host_sockets_dir()?.join("shell.sock"))
+}
+
 /// Get path to a figterm socket
 ///
 /// - Linux/Macos: `/var/tmp/fig/%USERNAME%/figterm/$SESSION_ID.sock`
