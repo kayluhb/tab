@@ -34,6 +34,10 @@ const ARROW_LEFT: char = 'D';
 const ARROW_RIGHT: char = 'C';
 /// A PTY runs the line on either of these
 const NEWLINES: [char; 2] = ['\r', '\n'];
+/// Keys the shell binds only while the popup would take them. A lone Esc also
+/// starts other keys, so while it is bound zsh waits `KEYTIMEOUT` after every Esc.
+/// Up and Down walk history otherwise, which should not wait on tabterm.
+const BOUND_WHILE_TAKEN: [&str; 3] = ["esc", "up", "down"];
 
 pub struct Session {
     pub session_id: String,
@@ -193,9 +197,8 @@ impl Session {
         Some(action)
     }
 
-    /// The keys the shell should bind, by the names it reports them with. A lone Esc
-    /// also starts other keys, so while it is bound zsh waits `KEYTIMEOUT` after every
-    /// Esc; it is bound only while the popup would take it.
+    /// The keys the shell should bind, by the names it reports them with. Some are
+    /// bound only while the popup would take them (see [`BOUND_WHILE_TAKEN`]).
     pub fn shell_keys(&self) -> BTreeSet<String> {
         let mut keys: BTreeSet<String> = self
             .interceptor
@@ -203,12 +206,11 @@ impl Session {
             .iter()
             .filter_map(shell_key_name)
             .collect();
-        let esc = KeyEvent {
-            key: KeyCode::Escape,
-            modifiers: Modifiers::NONE,
-        };
-        if self.preexec || self.interceptor.intercept_key(&esc).is_none() {
-            keys.remove("esc");
+        for name in BOUND_WHILE_TAKEN {
+            let taken = key_from_text(name).is_some_and(|event| self.interceptor.intercept_key(&event).is_some());
+            if self.preexec || !taken {
+                keys.remove(name);
+            }
         }
         keys
     }
@@ -693,6 +695,9 @@ mod tests {
             ],
             true,
         );
+        // Visible, so the keys bound only while the popup takes them are named too
+        s.interceptor.set_intercept(true);
+        s.interceptor.set_window_visible(true);
         let keys: Vec<String> = s.shell_keys().into_iter().collect();
         assert_eq!(keys, [
             "control+k",
@@ -731,6 +736,31 @@ mod tests {
 
         s.forget_bound_keys();
         assert_eq!(s.take_bind_update(), Some(keys), "a new connection gets the keys again");
+    }
+
+    #[test]
+    fn binds_arrows_only_while_the_popup_takes_them() {
+        // Up and Down walk history with no popup, without asking tabterm
+        let mut s = session("git ch", 6);
+        s.interceptor.set_actions(
+            &[
+                action("navigateUp", &["up"]),
+                action("navigateDown", &["down"]),
+                action("insertSelected", &["enter"]),
+            ],
+            true,
+        );
+        let keys = s.shell_keys();
+        assert!(!keys.contains("up") && !keys.contains("down"));
+        assert!(keys.contains("enter"), "still bound, to ask when pressed");
+
+        s.interceptor.set_intercept(true);
+        s.interceptor.set_window_visible(true);
+        let keys = s.shell_keys();
+        assert!(keys.contains("up") && keys.contains("down"));
+
+        s.interceptor.set_window_visible(false);
+        assert!(!s.shell_keys().contains("up"), "released when the popup hides");
     }
 
     #[test]

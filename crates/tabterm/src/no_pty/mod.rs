@@ -262,7 +262,7 @@ async fn main_loop(session_id: String, shell_pid: i32, listener: StdUnixListener
         }
 
         // Tell the shell which keys to bind whenever that changes: after the popup's
-        // keybindings load, and as Esc comes and goes with the popup
+        // keybindings load, and as Esc and the arrows come and go with the popup
         if let Some(tx) = &push_tx
             && let Some(keys) = session.take_bind_update()
         {
