@@ -1025,6 +1025,27 @@ mod test {
     }
 
     #[test]
+    fn zsh_no_pty_ghost_runs_no_widget_for_recalled_line() {
+        // A widget run from the push handler becomes $LASTWIDGET, which stops
+        // up-line-or-beginning-search continuing. Ghost text for a line a history
+        // widget recalled is stored only; for any other line it is drawn.
+        let Some(stdout) = run_no_pty_zsh(
+            r#"source "$1"
+            zle() { print -r -- "zle $*"; }
+            TAB_AUTOSUGGEST_STRATEGY=(specs history)
+            _tab_link_sent=$'4\techo'
+            _TAB_AUTOSUGGEST_CLEARED_BUFFER=echo
+            _tab_link_set_ghost $'ghost\techo\t two'
+            print -r -- "[$_tab_link_ghost_suffix]"
+            _TAB_AUTOSUGGEST_CLEARED_BUFFER=
+            _tab_link_set_ghost $'ghost\techo\t two'"#,
+        ) else {
+            return;
+        };
+        assert_eq!(stdout, "[ two]\nzle _tab_link_refresh_ghost");
+    }
+
+    #[test]
     fn test_legacy_codewhisperer_regex() {
         let re = regex::Regex::new(
             &DotfileShellIntegration {

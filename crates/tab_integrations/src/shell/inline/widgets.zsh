@@ -29,10 +29,20 @@ _tab_autosuggest_toggle() {
 
 # Clear the suggestion
 _tab_autosuggest_clear() {
+	local orig_buffer="$BUFFER"
+
 	# Remove the suggestion
 	unset POSTDISPLAY
 
 	_tab_autosuggest_invoke_original_widget $@
+
+	# Remember a line a history widget recalled, so no fetch runs for it. An
+	# async fetch ends in a widget, which changes $LASTWIDGET and breaks widgets
+	# that check it to continue, e.g. up-line-or-beginning-search.
+	typeset -g _TAB_AUTOSUGGEST_CLEARED_BUFFER
+	if (( $# )) && [[ "$BUFFER" != "$orig_buffer" ]]; then
+		_TAB_AUTOSUGGEST_CLEARED_BUFFER="$BUFFER"
+	fi
 }
 
 # Modify the buffer and get a new suggestion
@@ -84,6 +94,9 @@ _tab_autosuggest_modify() {
 
 # Fetch a new suggestion based on what's currently in the buffer
 _tab_autosuggest_fetch() {
+	# Not for a line a history widget recalled (see _tab_autosuggest_clear)
+	[[ -n "$_TAB_AUTOSUGGEST_CLEARED_BUFFER" && "$BUFFER" == "$_TAB_AUTOSUGGEST_CLEARED_BUFFER" ]] && return
+
 	if (( ${+TAB_AUTOSUGGEST_USE_ASYNC} )); then
 		_tab_autosuggest_async_request "$BUFFER"
 	else

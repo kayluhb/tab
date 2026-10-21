@@ -63,4 +63,41 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
+
+    #[test]
+    fn skips_fetch_for_recalled_line() {
+        if Command::new("zsh").arg("--version").output().is_err() {
+            return;
+        }
+
+        // An async fetch ends in a widget, which becomes $LASTWIDGET and stops
+        // up-line-or-beginning-search continuing. So no fetch runs for a line a
+        // history widget recalled, until the line is edited.
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        script.write_all(zsh_script().as_bytes()).unwrap();
+        let output = Command::new("zsh")
+            .args([
+                "-f",
+                "-c",
+                r#"source "$1"
+                zle -N recall-line true
+                zle() { BUFFER="echo two"; }
+                _tab_autosuggest_async_request() { print -r -- "fetch [$1]"; }
+                BUFFER=echo
+                _tab_autosuggest_clear recall-line
+                _tab_autosuggest_fetch
+                BUFFER="echo twox"
+                _tab_autosuggest_fetch"#,
+                "zsh",
+            ])
+            .arg(script.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "fetch [echo twox]");
+    }
 }
