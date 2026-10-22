@@ -20,6 +20,6 @@
     "csp.d.ts"
   ],
   "peerDependencies": {
-    "vite": "^6.3.4"
+    "vite": "^6.4.4"
   }
 }

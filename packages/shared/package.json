@@ -29,12 +29,12 @@
   },
   "devDependencies": {
     "@tab/eslint-config": "workspace:^",
+    "@tab/fuzzysort": "workspace:^",
     "@tab/tsconfig": "workspace:^",
     "@tab/types": "workspace:^",
-    "@tab/fuzzysort": "workspace:^",
     "@withfig/autocomplete-types": "^1.31.0",
-    "eslint": "^9.18.0",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.8"
+    "eslint": "^9.39.5",
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.7"
   }
 }

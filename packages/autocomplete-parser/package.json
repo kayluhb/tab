@@ -24,25 +24,25 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@tab/api-bindings-wrappers": "workspace:^",
-    "@tab/api-bindings": "workspace:^",
-    "@tab/shell-parser": "workspace:^",
     "@fig/autocomplete-generators": "^2.4.0",
     "@fig/autocomplete-helpers": "^2.0.0",
     "@fig/autocomplete-shared": "^1.1.2",
+    "@tab/api-bindings": "workspace:^",
+    "@tab/api-bindings-wrappers": "workspace:^",
+    "@tab/shell-parser": "workspace:^",
     "loglevel": "^1.9.2",
-    "semver": "^7.7.2",
-    "zod": "^3.25.7"
+    "semver": "^7.8.5",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@tab/eslint-config": "workspace:^",
+    "@tab/shared": "workspace:^",
     "@tab/tsconfig": "workspace:^",
     "@tab/types": "workspace:^",
-    "@tab/shared": "workspace:^",
-    "@types/semver": "^7.7.0",
+    "@types/semver": "^7.8.0",
     "@withfig/autocomplete-types": "^1.31.0",
-    "eslint": "^9.18.0",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.8"
+    "eslint": "^9.39.5",
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.7"
   }
 }

@@ -25,19 +25,19 @@
     "generate-requests": "tsx codegen/generate-requests.ts && prettier -w src/requests.ts"
   },
   "dependencies": {
-    "@tab/proto": "workspace:^",
-    "@bufbuild/protobuf": "2.4.0"
+    "@bufbuild/protobuf": "2.4.0",
+    "@tab/proto": "workspace:^"
   },
   "devDependencies": {
     "@tab/eslint-config": "workspace:^",
     "@tab/tsconfig": "workspace:^",
-    "@types/node": "^22.15.20",
-    "eslint": "^9.18.0",
-    "lint-staged": "^15.5.1",
-    "prettier": "^3.4.2",
+    "@types/node": "^22.20.5",
+    "eslint": "^9.39.5",
+    "lint-staged": "^15.5.2",
+    "prettier": "^3.9.10",
     "ts-morph": "^26.0.0",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "tsx": "^4.23.15",
+    "typescript": "~5.8.3"
   },
   "lint-staged": {
     "src/**/*.{ts,tsx}": "npx eslint --cache --fix"
