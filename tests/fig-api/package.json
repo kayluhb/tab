@@ -10,11 +10,11 @@
     "precommit": "exit 0"
   },
   "devDependencies": {
+    "@tab/api-bindings": "workspace:^",
     "@tab/tsconfig": "workspace:^",
     "@tab/types": "workspace:^",
-    "@tab/api-bindings": "workspace:^",
-    "@types/node": "^22.15.20",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.8"
+    "@types/node": "^22.20.5",
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.7"
   }
 }

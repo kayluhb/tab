@@ -23,7 +23,8 @@ const variants = cva(
 );
 
 interface LinkPropsBase
-  extends VariantProps<typeof variants>,
+  extends
+    VariantProps<typeof variants>,
     React.HTMLAttributes<HTMLAnchorElement> {}
 
 interface LinkPropsExternal extends LinkPropsBase {
