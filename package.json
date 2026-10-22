@@ -41,5 +41,10 @@
     "prettier": "^3.9.10",
     "turbo": "^2.11.10",
     "vitest": "^3.2.7"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "^6.4.4"
+    }
   }
 }
