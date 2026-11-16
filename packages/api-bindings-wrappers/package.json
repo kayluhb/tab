@@ -31,12 +31,12 @@
   },
   "devDependencies": {
     "@tab/eslint-config": "workspace:^",
+    "@tab/shared": "workspace:^",
     "@tab/tsconfig": "workspace:^",
     "@tab/types": "workspace:^",
-    "@tab/shared": "workspace:^",
     "@withfig/autocomplete-types": "^1.31.0",
-    "eslint": "^9.18.0",
-    "prettier": "^3.4.2",
-    "typescript": "^5.8.3"
+    "eslint": "^9.39.5",
+    "prettier": "^3.9.10",
+    "typescript": "~5.8.3"
   }
 }
