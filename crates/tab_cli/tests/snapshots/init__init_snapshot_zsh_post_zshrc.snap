@@ -394,11 +394,7 @@ _tab_link_report() {
   (( ++_tab_link_seq ))
   _tab_link_escape "$BUFFER"
   # A dropped report is sent again on the next redraw
-  _tab_link_send "buffer"$'\t'"$_tab_link_seq"$'\t'"$CURSOR"$'\t'"$REPLY" || return
-  _tab_link_sent=$state
-  # Hide the popup after a paste, so Enter runs the pasted line instead of
-  # accepting a suggestion. Plugins that wrap the widget keep its name.
-  [[ "$LASTWIDGET" == bracketed-paste ]] && _tab_link_focus_out
+  _tab_link_send "buffer"$'\t'"$_tab_link_seq"$'\t'"$CURSOR"$'\t'"$REPLY" && _tab_link_sent=$state
 }
 
 # Bound to the keys the popup uses. Asks tabterm whether the popup takes the
