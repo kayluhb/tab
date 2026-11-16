@@ -135,7 +135,9 @@ time = { version = "0.3.39", features = [
     "macros",
     "serde",
 ] }
-tokio = { version = "1.47.1", features = ["full"] }
+# Held below 1.54: it deprecates `AsyncFd::new` (used in crates/tabterm/src/pty/unix.rs),
+# and clippy -D warnings fails. Remove the cap when that call moves to `AsyncFd::register`.
+tokio = { version = ">=1.47.1, <1.54", features = ["full"] }
 tokio-tungstenite = "0.26.2"
 tokio-util = { version = "0.7.16", features = ["codec", "compat"] }
 toml = "0.8.12"
